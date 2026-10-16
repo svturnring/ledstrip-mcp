@@ -13,13 +13,24 @@
 import { Command } from "commander"
 
 import { BleLed, type BleLedOptions } from "./ble.js"
-import { configPath, loadConfig, saveConfig, unsetConfig, type BleConfig } from "./config.js"
+import {
+    addDevice,
+    configPath,
+    listDevices,
+    loadConfig,
+    removeDevice,
+    saveConfig,
+    setDefaultDevice,
+    unsetConfig,
+    type BleConfig,
+} from "./config.js"
 import { log, setVerbose } from "./log.js"
 import { listModels, parseColor, parseHexPacket, settleMsFor, type DecodedPacket } from "./protocol.js"
 interface GlobalOptions {
     address?: string
     name?: string
     model?: string
+    device?: string
     timeout: number
     warm: number
     json?: boolean
@@ -49,7 +60,7 @@ function toPercent(value: string, flag: string): number {
  */
 async function withLed<T>(opts: GlobalOptions, operation: (led: BleLed) => Promise<T>): Promise<T> {
     const options: BleLedOptions = {
-        target: { address: opts.address, name: opts.name, model: opts.model },
+        target: { address: opts.address, name: opts.name, model: opts.model, device: opts.device },
         timeoutMs: opts.timeout,
         warmMs: opts.warm,
     }
@@ -80,6 +91,7 @@ export function createProgram(): Command {
         .option("-a, --address <mac>", "MAC-адрес ленты (иначе ищем по имени)")
         .option("-n, --name <name>", "имя устройства в эфире")
         .option("-m, --model <model>", "принудительная модель из реестра (см. models)")
+        .option("-D, --device <alias>", "сохранённая лента по имени из config (см. devices)")
         .option("--timeout <ms>", "сколько ждать появления устройства, мс", "30000")
         .option("--warm <ms>", "держать соединение тёплым после команды, мс", "0")
         .option("--json", "машиночитаемый вывод")
@@ -116,11 +128,12 @@ export function createProgram(): Command {
                 for (const device of data.devices) {
                     const marks = [
                         device.matchesTarget ? "← цель" : "",
+                        device.likely ? "похоже на LED" : "",
                         device.fresh ? "новое" : "из кэша",
                         device.addressType ?? "",
                     ].filter(Boolean)
                     lines.push(
-                        `  ${signalText(device.rssi)}  ${device.address}  ${(device.name ?? "(без имени)").padEnd(24)} ${marks.join(", ")}`,
+                        `  ${signalText(device.rssi)}  ${device.address}  ${(device.name ?? "(без имени)").padEnd(24)} ${marks.join(", ")}  — ${device.hint}`,
                     )
                 }
                 if (target.length === 0) {
@@ -383,6 +396,98 @@ export function createProgram(): Command {
             )
         })
 
+    program
+        .command("devices")
+        .description("список сохранённых лент (алиас → адрес/имя/модель), * — по умолчанию")
+        .action(() => {
+            const opts = globals()
+            const config = loadConfig()
+            const devices = config.devices ?? {}
+            const def = config.default ?? null
+            const fallback =
+                !def && (config.address || config.name || config.model)
+                    ? { address: config.address ?? null, name: config.name ?? null, model: config.model ?? null }
+                    : null
+            print(opts, { path: configPath(), default: def, fallback, devices }, (data) => {
+                const aliases = Object.keys(data.devices).sort()
+                if (aliases.length === 0 && !data.fallback) {
+                    return (
+                        "Сохранённых лент нет.\n" +
+                        "Сначала найди адрес:  ble-mcp scan\n" +
+                        "Затем привяжи:        ble-mcp attach <имя> <MAC>   (например: attach спальня AA:BB:CC:DD:EE:FF)"
+                    )
+                }
+                const lines = aliases.map((alias) => {
+                    const entry = data.devices[alias]
+                    const mark = alias === data.default ? "*" : " "
+                    const where = entry?.address ?? (entry?.name ? `по имени ${entry.name}` : "адрес неизвестен")
+                    const model = entry?.model ? ` [${entry.model}]` : ""
+                    return `${mark} ${alias.padEnd(16)} ${where}${model}`
+                })
+                if (data.fallback) {
+                    const where =
+                        data.fallback.address ??
+                        (data.fallback.name ? `по имени ${data.fallback.name}` : "адрес неизвестен")
+                    const model = data.fallback.model ? ` [${data.fallback.model}]` : ""
+                    lines.unshift(`* (по умолчанию)  ${where}${model}`)
+                }
+                return lines.join("\n")
+            })
+        })
+
+    program
+        .command("attach")
+        .description("привязать найденное устройство под именем (алиасом), например 'спальня'")
+        .argument("<alias>", "имя ленты, например 'спальня' или 'гостиная'")
+        .argument("[mac]", "MAC-адрес из scan (если ещё неизвестен — укажи --dev-name)")
+        .option("--dev-name <name>", "имя устройства в эфире (если MAC пока неизвестен)")
+        .option("--dev-model <model>", "принудительная модель из реестра")
+        .option("--default", "сделать устройством по умолчанию")
+        .action(
+            (
+                alias: string,
+                mac: string | undefined,
+                cmd: { devName?: string; devModel?: string; default?: boolean },
+            ) => {
+                const opts = globals()
+                const isNew = !(alias in listDevices())
+                if (isNew && !mac && !cmd.devName) {
+                    throw new Error("укажи MAC (позиционно) или --dev-name, иначе нечего привязывать")
+                }
+                const config = addDevice(
+                    alias,
+                    { address: mac, name: cmd.devName, model: cmd.devModel },
+                    { makeDefault: Boolean(cmd.default) },
+                )
+                const entry = config.devices?.[alias]
+                print(
+                    opts,
+                    { path: configPath(), alias, entry: entry ?? null, default: config.default ?? null },
+                    () => `Привязано: «${alias}» → ${entry?.address ?? (entry?.name ? `по имени ${entry.name}` : "?")}`,
+                )
+            },
+        )
+
+    program
+        .command("detach")
+        .description("отвязать ленту по имени (алиасу)")
+        .argument("<alias>", "имя ленты")
+        .action((alias: string) => {
+            const opts = globals()
+            const config = removeDevice(alias)
+            print(opts, { path: configPath(), alias, default: config.default ?? null }, () => `Отвязано: «${alias}»`)
+        })
+
+    program
+        .command("default")
+        .description("сделать ленту устройством по умолчанию")
+        .argument("<alias>", "имя ленты")
+        .action((alias: string) => {
+            const opts = globals()
+            const config = setDefaultDevice(alias)
+            print(opts, { path: configPath(), default: config.default ?? null }, () => `По умолчанию: «${alias}»`)
+        })
+
     // --- MCP --------------------------------------------------------------
 
     program
@@ -399,7 +504,7 @@ export function createProgram(): Command {
             // pays for a full scan-and-connect cycle.
             const warm = opts.warm > 0 ? opts.warm : 120_000
             const led = new BleLed({
-                target: { address: opts.address, name: opts.name, model: opts.model },
+                target: { address: opts.address, name: opts.name, model: opts.model, device: opts.device },
                 timeoutMs: opts.timeout,
                 warmMs: Number.isFinite(warm) ? warm : 120_000,
             })

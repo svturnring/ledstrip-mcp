@@ -100,6 +100,74 @@ export function listModels(): ModelSpec[] {
     return [...MODELS].sort((a, b) => a.name.localeCompare(b.name))
 }
 
+/** How confident a name-based device guess is. */
+export type DeviceConfidence = "model" | "name" | "unlikely"
+
+export interface DeviceGuess {
+    /** Whether it looks like a supported LED-strip controller. */
+    likely: boolean
+    /** How the guess was made. */
+    confidence: DeviceConfidence
+    /** Matched model from the registry, if any. */
+    model?: string
+    /** Human-readable explanation for the agent/user. */
+    hint: string
+}
+
+/**
+ * Name patterns of controllers from the same ecosystem that are not (yet) in the
+ * registry. BLE device names are arbitrary — they do NOT have to contain "BLE" —
+ * so this is only a hint, never a guarantee.
+ */
+const LED_NAME_PATTERNS: { pattern: RegExp; hint: string }[] = [
+    { pattern: /^elk[-_ ]?ble/i, hint: "префикс ELK — контроллер ELK-BLED*" },
+    { pattern: /^melk/i, hint: "префикс MELK" },
+    { pattern: /ledble/i, hint: "LEDBLE" },
+    { pattern: /lednet/i, hint: "LEDnet" },
+    { pattern: /triones/i, hint: "приложение Triones" },
+    { pattern: /happy[-_ ]?light/i, hint: "HappyLighting" },
+    { pattern: /magic[-_ ]?(home|light)/i, hint: "MagicHome/MagicLight" },
+    { pattern: /qhm/i, hint: "префикс QHM" },
+    { pattern: /(^|[-_ ])led([-_ ]|\d|$)/i, hint: "в имени есть LED" },
+    { pattern: /light|strip|лента/i, hint: "в имени есть light/strip" },
+]
+
+/**
+ * Guess whether an advertising name belongs to an LED-strip controller.
+ *
+ * A registry match is fairly reliable; the rest is a soft hint, because the same
+ * hardware ships under many random names.
+ */
+export function classifyDeviceName(name: string | undefined): DeviceGuess {
+    const trimmed = name?.trim()
+    if (!trimmed) {
+        return {
+            likely: false,
+            confidence: "unlikely",
+            hint: "у устройства нет имени в рекламе — определить на глаз нельзя, ориентируйся на RSSI и адрес",
+        }
+    }
+    const model = findModel(trimmed)
+    if (model) {
+        return {
+            likely: true,
+            confidence: "model",
+            model: model.name,
+            hint: `известная модель из реестра: ${model.name}`,
+        }
+    }
+    for (const { pattern, hint } of LED_NAME_PATTERNS) {
+        if (pattern.test(trimmed)) {
+            return { likely: true, confidence: "name", hint: `похоже на LED-контроллер: ${hint}` }
+        }
+    }
+    return {
+        likely: false,
+        confidence: "unlikely",
+        hint: "не похоже на LED-контроллер по имени — возможно, другое устройство",
+    }
+}
+
 /**
  * A wrapper over a model: builds concrete packets for a concrete strip.
  */

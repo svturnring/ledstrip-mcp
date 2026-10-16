@@ -1,35 +1,38 @@
 /**
- * Transport: discovery, connection and command writes to a BLE LED strip via
+ * Transport: discovery, connection and command writes to BLE LED strips via
  * BlueZ (the node-ble library, which talks to org.bluez over D-Bus).
  *
  * Real-world quirks handled here:
  *
- *  - The strip advertises ONLY while nothing is connected to it. If the phone
+ *  - A strip advertises ONLY while nothing is connected to it. If the phone
  *    keeps its app open, the device is not on air and cannot be connected to.
  *    Hence the explicit error with a hint.
  *  - BlueZ remembers devices from its cache, so before connecting by address we
  *    always start discovery: this "wakes" the strip and puts it into the cache
  *    (otherwise Connect fails with "not available").
- *  - The strip sleeps and drops off, so there are retries and a "warm"
- *    connection: it is kept for N ms after the last command so a series of
- *    commands does not reconnect every time.
- *  - All operations are strictly serialized: parallel writes would interleave
+ *  - Strips sleep and drop off, so there are retries and a "warm" connection:
+ *    kept for N ms after the last command so a series of commands does not
+ *    reconnect every time.
+ *  - Several strips may be controlled at once. Connections are pooled and keyed
+ *    by MAC address; each has its own idle timer. Named devices (see config.ts)
+ *    are just a friendly alias over an address.
+ *  - Every operation is strictly serialized: parallel writes would interleave
  *    the mandatory settle delay and some commands would be silently swallowed.
  */
 
 import { createBluetooth } from "node-ble"
 import type { Adapter, Bluetooth, Device, GattCharacteristic, GattServer } from "node-ble"
 
-import { configPath, resolveTarget, saveConfig, type BleConfig, type Target } from "./config.js"
+import { addDevice, configPath, resolveTarget, saveConfig, type BleConfig, type Target } from "./config.js"
 import { debug, log } from "./log.js"
-import { Protocol, decodePacket, formatHex, sleep, type DecodedPacket } from "./protocol.js"
+import { Protocol, classifyDeviceName, decodePacket, formatHex, sleep, type DecodedPacket } from "./protocol.js"
 
 export interface BleLedOptions {
     /** How long to wait for the device to appear on air, ms. */
     timeoutMs?: number
-    /** How long to keep the connection after the last command, ms (0 — drop immediately). */
+    /** How long to keep a connection after its last command, ms (0 — drop immediately). */
     warmMs?: number
-    /** Address/name/model (CLI flags, env, config). */
+    /** Base target: address/name/model/device alias (CLI flags, env, config). */
     target?: Partial<Target>
     /** Number of connection attempts. */
     connectTries?: number
@@ -44,6 +47,14 @@ export interface ScanResult {
     fresh: boolean
     /** The name matched the configured target. */
     matchesTarget: boolean
+    /** Whether the name looks like an LED-strip controller. */
+    likely: boolean
+    /** How the guess was made ("model" / "name" / "unlikely"). */
+    confidence: string
+    /** Registry model detected from the name, if any. */
+    model?: string
+    /** Human-readable explanation of the guess. */
+    hint: string
 }
 
 export interface CharacteristicInfo {
@@ -78,7 +89,16 @@ export interface CommandResult {
     settleMs: number
 }
 
+export interface ConnectionInfo {
+    address: string
+    name?: string
+    model: string
+    connected: boolean
+}
+
 export interface StatusInfo {
+    /** Alias of the resolved named device, if any. */
+    device?: string
     /** Address from the config/flags (may be absent — then we search by name). */
     address?: string
     /** The name we search for. */
@@ -92,7 +112,7 @@ export interface StatusInfo {
     /** Detected protocol model, if connected. */
     protocol?: string
     settleMs?: number
-    /** Last command sent (hex). */
+    /** Last command sent to this device (hex). */
     lastSent?: string
     configPath: string
 }
@@ -107,6 +127,8 @@ interface Connection {
     writeWithResponse: boolean
     deviceName?: string
     address: string
+    /** Last command sent on this connection (hex). */
+    lastSent?: string
 }
 
 function errorText(error: unknown): string {
@@ -118,26 +140,30 @@ export class BleLed {
     private bluetooth?: Bluetooth
     private destroySession?: () => void
     private adapter?: Adapter
-    private conn?: Connection
-    private idleTimer?: NodeJS.Timeout
+    /** Live connections, keyed by MAC address. */
+    private conns = new Map<string, Connection>()
+    /** Per-connection idle-close timers. */
+    private idleTimers = new Map<string, NodeJS.Timeout>()
     /** Operation queue: guarantees that commands do not interleave. */
     private queue: Promise<unknown> = Promise.resolve()
     private target: Partial<Target>
-    private lastSent?: string
 
     constructor(private readonly options: BleLedOptions = {}) {
         this.target = options.target ?? {}
     }
 
-    /** Change the target (address/name/model). Changing the address drops the connection. */
+    /** Change the base target (address/name/model/device). Closes the affected connection on change. */
     async configure(target: Partial<Target>): Promise<void> {
-        const previous = resolveTarget(this.target)
-        const next = resolveTarget({ ...this.target, ...target })
-        const addressChanged = previous.address !== next.address || previous.name !== next.name
+        const previous = this.resolve()
         this.target = { ...this.target, ...target }
-        if (addressChanged && this.conn) {
-            await this.close()
-        }
+        const next = this.resolve()
+        const changed =
+            previous.address !== next.address || previous.name !== next.name || previous.device !== next.device
+        if (changed) await this.closeTarget(previous)
+    }
+
+    private resolve(extra?: Partial<Target>): Target {
+        return resolveTarget({ ...this.target, ...extra })
     }
 
     private async serialize<T>(operation: () => Promise<T>): Promise<T> {
@@ -187,7 +213,7 @@ export class BleLed {
         return Number.isFinite(rssi) ? rssi : undefined
     }
 
-    /** Skip a device: "garbage" cache entries have no RSSI. */
+    /** Match an advertising name against a wanted name by prefix (trailing `*` ignored). */
     private matchesName(name: string | undefined, wanted: string): boolean {
         if (!name) return false
         const clean = wanted.trim().replace(/\*+$/, "").toLowerCase()
@@ -225,19 +251,25 @@ export class BleLed {
         throw new Error(`характеристика ${uuid} не найдена в GATT-профиле устройства`)
     }
 
-    private async connect(): Promise<Connection> {
-        if (this.conn) return this.conn
+    private findConnection(target: Target): Connection | undefined {
+        if (target.address) return this.conns.get(target.address)
+        return [...this.conns.values()].find((conn) => this.matchesName(conn.deviceName, target.name))
+    }
 
-        const target = resolveTarget(this.target)
+    private async connect(target: Target): Promise<Connection> {
         const adapter = await this.getAdapter()
         const timeoutMs = this.options.timeoutMs ?? 30_000
 
         let address = target.address
-        let discoveredName: string | undefined
         if (!address) {
+            // Already connected by name? Reuse it instead of rediscovering.
+            const existing = this.findConnection(target)
+            if (existing) return existing
             address = await this.waitForAddress(adapter, target.name, timeoutMs)
-            debug(`нашли по имени: ${address}`)
+            debug(`нашли по имени «${target.name}»: ${address}`)
         }
+        const cached = this.conns.get(address)
+        if (cached) return cached
 
         const tries = this.options.connectTries ?? 3
         let lastError: unknown
@@ -250,14 +282,14 @@ export class BleLed {
                 const device = await adapter.waitDevice(address, Math.min(timeoutMs, 20_000))
                 await device.connect()
 
-                discoveredName = discoveredName ?? (await this.safeName(device))
-                const protocol = Protocol.forDevice(discoveredName ?? target.name, target.model)
+                const discoveredName = (await this.safeName(device)) ?? target.name
+                const protocol = Protocol.forDevice(discoveredName, target.model)
                 const gatt = await device.gatt()
                 const write = await this.locateCharacteristic(gatt, protocol.writeUuid)
                 const flags = await write.getFlags().catch(() => [] as string[])
                 const notify = await this.locateCharacteristic(gatt, protocol.notifyUuid).catch(() => undefined)
 
-                this.conn = {
+                const conn: Connection = {
                     device,
                     gatt,
                     write,
@@ -267,22 +299,23 @@ export class BleLed {
                     deviceName: discoveredName,
                     address,
                 }
-                this.lastSent = undefined
+                this.conns.set(address, conn)
 
                 // Remember the discovered address so future connections go straight to it.
                 if (target.address !== address) {
                     try {
-                        saveConfig({ address, name: discoveredName ?? target.name })
+                        if (target.device) addDevice(target.device, { address, name: discoveredName })
+                        else saveConfig({ address, name: discoveredName })
                     } catch (error) {
                         debug(`не удалось сохранить адрес в конфиг: ${errorText(error)}`)
                     }
                 }
 
                 debug(
-                    `подключено: ${discoveredName ?? "(без имени)"} [${address}], модель ${protocol.name}, ` +
-                        `settle ${protocol.settleMs} мс${this.conn.writeWithResponse ? ", write с ответом" : ""}`,
+                    `подключено: ${discoveredName} [${address}], модель ${protocol.name}, ` +
+                        `settle ${protocol.settleMs} мс${conn.writeWithResponse ? ", write с ответом" : ""}`,
                 )
-                return this.conn
+                return conn
             } catch (error) {
                 lastError = error
                 debug(`попытка подключения ${attempt}/${tries}: ${errorText(error)}`)
@@ -308,28 +341,31 @@ export class BleLed {
      * what is written in the config. Otherwise auto-detection could easily send
      * another model's bytes.
      */
-    async run(build: (protocol: Protocol) => Buffer | Buffer[]): Promise<CommandResult> {
-        return this.send(build)
+    async run(build: (protocol: Protocol) => Buffer | Buffer[], extra?: Partial<Target>): Promise<CommandResult> {
+        return this.send(build, extra)
     }
 
     /** Send one or more commands in sequence, with the mandatory pauses. */
-    async send(packets: Buffer[] | ((protocol: Protocol) => Buffer | Buffer[])): Promise<CommandResult> {
+    async send(
+        packets: Buffer[] | ((protocol: Protocol) => Buffer | Buffer[]),
+        extra?: Partial<Target>,
+    ): Promise<CommandResult> {
         return this.serialize(async () => {
-            const conn = await this.connect()
+            const conn = await this.connect(this.resolve(extra))
             const built = typeof packets === "function" ? packets(conn.protocol) : packets
             const list = Array.isArray(built) ? built : [built]
             const sent: string[] = []
             for (const packet of list) {
                 await this.write(conn, packet)
                 sent.push(formatHex(packet))
-                this.lastSent = formatHex(packet)
+                conn.lastSent = formatHex(packet)
                 debug(`→ ${formatHex(packet)}`)
                 // The pause is always needed, including after the last command in
                 // a series: otherwise the next one (from another call) could land
                 // inside the window.
                 await sleep(conn.protocol.settleMs)
             }
-            this.scheduleIdleDisconnect()
+            this.scheduleIdleDisconnect(conn)
             return { address: conn.address, model: conn.protocol.name, sent, settleMs: conn.protocol.settleMs }
         })
     }
@@ -342,11 +378,12 @@ export class BleLed {
             await this.ensureDiscovery(adapter)
             log(`скан ${Math.round(durationMs / 1000)} с...`)
             await sleep(durationMs)
-            const target = resolveTarget(this.target)
+            const target = this.resolve()
             const results: ScanResult[] = []
             for (const address of await adapter.devices()) {
                 const device = await adapter.getDevice(address)
                 const name = await this.safeName(device)
+                const guess = classifyDeviceName(name)
                 results.push({
                     address,
                     name,
@@ -354,6 +391,10 @@ export class BleLed {
                     addressType: await device.getAddressType().catch(() => undefined),
                     fresh: !cached.has(address),
                     matchesTarget: this.matchesName(name, target.name),
+                    likely: guess.likely,
+                    confidence: guess.confidence,
+                    model: guess.model,
+                    hint: guess.hint,
                 })
             }
             results.sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999))
@@ -362,9 +403,9 @@ export class BleLed {
     }
 
     /** GATT profile of the connected device. */
-    async info(): Promise<DeviceInfo> {
+    async info(extra?: Partial<Target>): Promise<DeviceInfo> {
         return this.serialize(async () => {
-            const conn = await this.connect()
+            const conn = await this.connect(this.resolve(extra))
             const services: ServiceInfo[] = []
             for (const serviceUuid of await conn.gatt.services()) {
                 const service = await conn.gatt.getPrimaryService(serviceUuid)
@@ -378,7 +419,7 @@ export class BleLed {
                 }
                 services.push({ uuid: serviceUuid, characteristics })
             }
-            this.scheduleIdleDisconnect()
+            this.scheduleIdleDisconnect(conn)
             return {
                 address: conn.address,
                 name: conn.deviceName,
@@ -402,9 +443,10 @@ export class BleLed {
     async watch(
         durationMs = 20_000,
         onPacket?: (packet: DecodedPacket) => void,
+        extra?: Partial<Target>,
     ): Promise<{ address: string; model: string; packets: DecodedPacket[]; notifyUuid: string }> {
         return this.serialize(async () => {
-            const conn = await this.connect()
+            const conn = await this.connect(this.resolve(extra))
             if (!conn.notify) {
                 throw new Error(`у модели ${conn.protocol.name} нет характеристики уведомлений — watch недоступен`)
             }
@@ -423,55 +465,87 @@ export class BleLed {
                 conn.notify.off("valuechanged", listener)
                 await conn.notify.stopNotifications().catch(() => undefined)
             }
-            this.scheduleIdleDisconnect()
+            this.scheduleIdleDisconnect(conn)
             return { address: conn.address, model: conn.protocol.name, packets, notifyUuid: conn.protocol.notifyUuid }
         })
     }
 
-    /** Current state: config + whether a live connection exists. */
-    async status(): Promise<StatusInfo> {
-        const target = resolveTarget(this.target)
-        const connected = this.conn
-            ? await this.conn.device
+    /** Current state of the resolved device: config + whether a live connection exists. */
+    async status(extra?: Partial<Target>): Promise<StatusInfo> {
+        const target = this.resolve(extra)
+        const conn = this.findConnection(target)
+        const connected = conn
+            ? await conn.device
                   .isConnected()
                   .then(Boolean)
                   .catch(() => false)
             : false
         return {
+            device: target.device,
             address: target.address,
             name: target.name,
             model: target.model,
             connected,
-            deviceName: connected ? this.conn?.deviceName : undefined,
-            protocol: connected ? this.conn?.protocol.name : undefined,
-            settleMs: connected ? this.conn?.protocol.settleMs : undefined,
-            lastSent: this.lastSent,
+            deviceName: connected ? conn?.deviceName : undefined,
+            protocol: connected ? conn?.protocol.name : undefined,
+            settleMs: connected ? conn?.protocol.settleMs : undefined,
+            lastSent: conn?.lastSent,
             configPath: configPath(),
         }
     }
 
-    /** Keep the connection warm: the strip sleeps and reconnecting is not fast. */
-    private scheduleIdleDisconnect(): void {
-        const warmMs = this.options.warmMs ?? 0
-        if (this.idleTimer) clearTimeout(this.idleTimer)
-        if (warmMs <= 0) return
-        this.idleTimer = setTimeout(() => {
-            void this.close().catch(() => undefined)
-        }, warmMs)
-        this.idleTimer.unref()
+    /** All live connections (used to show which named devices are currently connected). */
+    async connections(): Promise<ConnectionInfo[]> {
+        const list: ConnectionInfo[] = []
+        for (const conn of this.conns.values()) {
+            const connected = await conn.device
+                .isConnected()
+                .then(Boolean)
+                .catch(() => false)
+            list.push({ address: conn.address, name: conn.deviceName, model: conn.protocol.name, connected })
+        }
+        return list
     }
 
-    /** Disconnect and close the D-Bus session. */
-    async close(): Promise<void> {
-        if (this.idleTimer) {
-            clearTimeout(this.idleTimer)
-            this.idleTimer = undefined
+    /** Close one connection (by address, or by name if no address is known). */
+    async closeTarget(extra?: Partial<Target>): Promise<void> {
+        const conn = this.findConnection(this.resolve(extra))
+        if (conn) await this.closeConnection(conn.address)
+    }
+
+    /** Keep the connection warm: a strip sleeps and reconnecting is not fast. */
+    private scheduleIdleDisconnect(conn: Connection): void {
+        const warmMs = this.options.warmMs ?? 0
+        const existing = this.idleTimers.get(conn.address)
+        if (existing) clearTimeout(existing)
+        if (warmMs <= 0) return
+        const timer = setTimeout(() => {
+            void this.closeConnection(conn.address).catch(() => undefined)
+        }, warmMs)
+        timer.unref()
+        this.idleTimers.set(conn.address, timer)
+    }
+
+    private async closeConnection(address: string): Promise<void> {
+        const timer = this.idleTimers.get(address)
+        if (timer) {
+            clearTimeout(timer)
+            this.idleTimers.delete(address)
         }
-        const conn = this.conn
-        this.conn = undefined
+        const conn = this.conns.get(address)
+        this.conns.delete(address)
         if (conn) {
-            await conn.device.disconnect().catch((error: unknown) => debug(`disconnect: ${errorText(error)}`))
+            await conn.device
+                .disconnect()
+                .catch((error: unknown) => debug(`disconnect ${address}: ${errorText(error)}`))
         }
+    }
+
+    /** Disconnect everything and close the D-Bus session. */
+    async close(): Promise<void> {
+        for (const timer of this.idleTimers.values()) clearTimeout(timer)
+        this.idleTimers.clear()
+        for (const address of [...this.conns.keys()]) await this.closeConnection(address)
         if (this.destroySession) {
             try {
                 this.destroySession()

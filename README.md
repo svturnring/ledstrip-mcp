@@ -1,7 +1,6 @@
 # ble-mcp
 
-MCP server and CLI for BLE LED-strip controllers of the **ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK** family.
-Written in TypeScript, talks to BlueZ over D-Bus, **no native builds**.
+MCP server and CLI for BLE LED-strip controllers of the **ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK** family. Written in TypeScript, talks to BlueZ over D-Bus, **no native builds**.
 
 The same functionality is exposed two ways:
 
@@ -29,44 +28,70 @@ A launcher is installed at `~/.local/bin/ble-mcp` and points to `dist/index.js`,
 ## Quick start
 
 ```sh
-ble-mcp scan                    # what is in the air at all
-ble-mcp config --set-address BE:27:CB:00:46:7A --set-name ELK-BLEDDM
-ble-mcp on
+ble-mcp scan                                              # what is in the air at all
+ble-mcp attach living-room AA:BB:CC:DD:EE:01 --default    # bind a found strip under a name
+ble-mcp on                                                # the default strip
 ble-mcp color '#ff8800'
 ble-mcp brightness 40
-ble-mcp effect 3 128 70         # effect, speed, brightness — as one series
+ble-mcp effect 3 128 70                                   # effect, speed, brightness — as one series
 ble-mcp off
 ```
 
 The first scan is needed to learn the MAC address. The address is stored in the config, and afterwards connections go straight to it — much faster than searching by name.
 
+## Multiple strips
+
+Several strips can be kept side by side. A strip is identified by a **name (alias)** — for example by room — which is just a pointer to a MAC address in the config. Discover the devices, then attach them:
+
+```sh
+ble-mcp scan
+ble-mcp attach living-room AA:BB:CC:DD:EE:01 --default
+ble-mcp attach bedroom     AA:BB:CC:DD:EE:02
+ble-mcp devices
+```
+
+```text
+* living-room      AA:BB:CC:DD:EE:01
+  bedroom          AA:BB:CC:DD:EE:02
+```
+
+Now any command takes `-D/--device <alias>`; without it the default strip is used:
+
+```sh
+ble-mcp -D bedroom color red
+ble-mcp -D bedroom brightness 20
+ble-mcp -D living-room white 80
+```
+
+Registry management:
+
+| Command                | Description                                                                |
+| ---------------------- | -------------------------------------------------------------------------- |
+| `devices`              | list saved strips, `*` marks the default                                   |
+| `attach <alias> [mac]` | bind a found strip under a name (`--dev-name`, `--dev-model`, `--default`) |
+| `detach <alias>`       | unbind                                                                     |
+| `default <alias>`      | switch the default strip                                                   |
+
+If the MAC is not known yet, bind by advertising name and the address is learned and saved on first use:
+
+```sh
+ble-mcp attach bedroom --dev-name ELK-BLEDOM
+```
+
+The same works from an agent: `ble_scan` → `ble_add_device` → the control tools take a `device` argument (see [MCP tools](#mcp-tools)). Each strip has its own connection, so a warm MCP server can hold several strips open at once.
+
 ## CLI
 
-| Command | Description |
-| --- | --- |
-| `scan [-d seconds]` | scan the air, show RSSI, freshness (live or from the BlueZ cache) and mark the configured target |
-| `status` | show the config and whether a connection is alive (does not connect) |
-| `info` | connect and show the GATT profile: services, characteristics, flags, detected model, settle delay |
-| `on` / `off` | turn the strip on / off |
-| `color <#rrggbb\|rrggbb\|r,g,b>` | set color |
-| `white <0-100>` | white light at the given brightness |
-| `brightness <0-100>` | set brightness |
-| `kelvin <K>` | color temperature (1800 K warm … 7000 K cool) |
-| `effect <n> [speed] [brightness]` | effect by index (0-127 standard, 128-135 mic modes) |
-| `speed <v>` | speed of the current effect |
-| `raw <hex>` | send an arbitrary packet, for debugging |
-| `watch [-d seconds]` | listen to the notify channel |
-| `models` | list supported controller models |
-| `config [--set-address/--set-name/--set-model/--unset]` | show or change the saved config |
-| `serve [-t stdio\|http]` | start the MCP server |
+| `scan [-d seconds]` | scan the air: show RSSI, freshness (live or from the BlueZ cache) and a hint on whether each device looks like an LED strip; the configured target is marked | | `status` | show the config and whether a connection is alive (does not connect) | | `info` | connect and show the GATT profile: services, characteristics, flags, detected model, settle delay | | `on` / `off` | turn the strip on / off | | `color <#rrggbb\|rrggbb\|r,g,b>` | set color | | `white <0-100>` | white light at the given brightness | | `brightness <0-100>` | set brightness | | `kelvin <K>` | color temperature (1800 K warm … 7000 K cool) | | `effect <n> [speed] [brightness]` | effect by index (0-127 standard, 128-135 mic modes) | | `speed <v>` | speed of the current effect | | `raw <hex>` | send an arbitrary packet, for debugging | | `watch [-d seconds]` | listen to the notify channel | | `models` | list supported controller models | | `devices` | list saved strips (* — default) | | `attach <alias> [mac]` | bind a strip under a name (`--dev-name`, `--dev-model`, `--default`) | | `detach <alias>` | unbind a strip | | `default <alias>` | switch the default strip | | `config [--set-address/--set-name/--set-model/--unset]` | show or change the legacy single-device config | | `serve [-t stdio\|http]` | start the MCP server |
 
-Global options: `-a/--address`, `-n/--name`, `-m/--model`, `--timeout <ms>` (how long to wait for the device), `--warm <ms>` (keep the connection alive for), `--json` (machine-readable output), `-v/--verbose`.
+Global options: `-a/--address`, `-n/--name`, `-m/--model`, `-D/--device <alias>`, `--timeout <ms>` (how long to wait for the device), `--warm <ms>` (keep the connection alive for), `--json` (machine-readable output), `-v/--verbose`.
 
 Examples:
 
 ```sh
-ble-mcp scan -d 15 --json | jq '.devices[] | select(.matchesTarget)'
-ble-mcp -a BE:27:CB:00:46:7A -n ELK-BLEDDM color '255,136,0'
+ble-mcp scan -d 15 --json | jq '.devices[] | select(.likely)'
+ble-mcp -D bedroom color '255,136,0'
+ble-mcp -a AA:BB:CC:DD:EE:01 -n ELK-BLEDDM color red
 ble-mcp --warm 60000 serve -t http --port 8765
 ```
 
@@ -132,34 +157,53 @@ Connecting from opencode:
 
 | Tool | Arguments | Description |
 | --- | --- | --- |
-| `ble_status` | — | config and connection state |
-| `ble_scan` | `durationSeconds?` | scan the air |
-| `ble_info` | — | GATT profile and detected model |
-| `ble_power` | `state: on\|off` | turn on / off |
-| `ble_set_color` | `color` | set color |
-| `ble_set_brightness` | `percent` | brightness 0-100 |
-| `ble_set_white` | `percent` | white 0-100 |
-| `ble_set_color_temperature` | `kelvin` | warm / cool temperature |
-| `ble_set_effect` | `index`, `speed?`, `brightness?` | effect, optionally with speed and brightness in one call |
-| `ble_set_speed` | `value` | speed of the current effect |
-| `ble_send_raw` | `packet` | arbitrary packet in hex |
-| `ble_watch` | `durationSeconds?` | listen to the notify channel |
-| `ble_configure` | `address?`, `name?`, `model?` | save device parameters |
+| `ble_status` | `device?` | config and connection state |
+| `ble_scan` | `durationSeconds?` | scan the air and hint which devices look like LED strips |
+| `ble_info` | `device?` | GATT profile and detected model |
+| `ble_power` | `state: on\|off`, `device?` | turn on / off |
+| `ble_set_color` | `color`, `device?` | set color |
+| `ble_set_brightness` | `percent`, `device?` | brightness 0-100 |
+| `ble_set_white` | `percent`, `device?` | white 0-100 |
+| `ble_set_color_temperature` | `kelvin`, `device?` | warm / cool temperature |
+| `ble_set_effect` | `index`, `speed?`, `brightness?`, `device?` | effect, optionally with speed and brightness in one call |
+| `ble_set_speed` | `value`, `device?` | speed of the current effect |
+| `ble_send_raw` | `packet`, `device?` | arbitrary packet in hex |
+| `ble_watch` | `durationSeconds?`, `device?` | listen to the notify channel |
+| `ble_devices` | — | list saved strips, which is the default and which are connected |
+| `ble_add_device` | `device`, `address?`, `name?`, `model?`, `setDefault?` | bind a strip under a name |
+| `ble_remove_device` | `device` | unbind a strip |
+| `ble_configure` | `address?`, `name?`, `model?` | save the default device parameters (legacy single-device) |
 | `ble_list_models` | — | model registry |
 
-A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` → `ble_configure` → control commands.
+Every control tool accepts an optional **`device`** argument — the alias of a saved strip (e.g. `"bedroom"`). Without it, the default strip is used.
+
+A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` → `ble_add_device`/`ble_configure` → control commands with `device`. For several strips: `ble_scan` → `ble_add_device` per strip → `ble_set_color` with `device: "bedroom"`.
 
 ## Configuration
 
-Priority: **CLI arguments → environment variables → config file → default**.
+Priority: **CLI arguments / tool arguments → environment variables → named device → config file → default**.
 
-File: `~/.config/ble-mcp/config.json` (the directory can be overridden with `BLE_MCP_CONFIG_DIR`):
+File: `~/.config/ble-mcp/config.json` (the directory can be overridden with `BLE_MCP_CONFIG_DIR`).
+
+Named devices (`devices` map + `default` alias) are what `attach` / `ble_add_device` write:
 
 ```json
-{ "address": "BE:27:CB:00:46:7A", "name": "ELK-BLEDDM" }
+{
+    "default": "bedroom",
+    "devices": {
+        "living-room": { "address": "AA:BB:CC:DD:EE:01", "name": "ELK-BLEDDM" },
+        "bedroom": { "address": "AA:BB:CC:DD:EE:02", "model": "ELK-BLEDOM" }
+    }
+}
 ```
 
-Environment variables: `BLE_MCP_ADDRESS`, `BLE_MCP_NAME`, `BLE_MCP_MODEL`, `BLE_MCP_VERBOSE=1`.
+The legacy single-device shape is still supported and acts as the default when no `default` alias is set:
+
+```json
+{ "address": "AA:BB:CC:DD:EE:FF", "name": "ELK-BLEDDM" }
+```
+
+Environment variables: `BLE_MCP_ADDRESS`, `BLE_MCP_NAME`, `BLE_MCP_MODEL`, `BLE_MCP_DEVICE` (alias of the default strip), `BLE_MCP_VERBOSE=1`.
 
 `address` speeds everything up: connection goes straight to the device instead of searching by name. `model` is only needed when auto-detection gets it wrong.
 
@@ -169,10 +213,10 @@ Environment variables: `BLE_MCP_ADDRESS`, `BLE_MCP_NAME`, `BLE_MCP_MODEL`, `BLE_
 
 ```
 src/models.ts    — model registry (generated from models/models.json)
-src/protocol.ts  — packet building/parsing, input parsers, model detection
-src/config.ts    — config file and priority rules
+src/protocol.ts  — packet building/parsing, input parsers, model detection, device-name classifier
+src/config.ts    — config: named devices, priority rules
 src/log.ts       — logging, always to stderr
-src/ble.ts       — transport: discovery, connect, write, notify, retries, warm connection
+src/ble.ts       — transport: discovery, connection pool (one per strip), write, notify, retries, warm connection
 src/cli.ts       — CLI (commander)
 src/mcp.ts       — MCP server (stdio + streamable HTTP)
 src/index.ts     — entry point, dispatches CLI or MCP
@@ -186,15 +230,15 @@ src/index.ts     — entry point, dispatches CLI or MCP
 7E | type/length | cmd | payload ... | EF
 ```
 
-| Action | Packet |
-| --- | --- |
-| turn on | `7e 04 04 f0 00 01 ff 00 ef` |
-| turn off | `7e 04 04 00 00 00 ff 00 ef` |
-| color | `7e 00 05 03 r g b 00 ef` |
-| white | `7e 00 01 i 00 00 00 00 ef` |
-| brightness | `7e 04 01 i ff 00 ff 00 ef` |
-| speed | `7e 00 02 v 00 00 00 00 ef` |
-| effect | `7e 00 03 v 03 00 00 00 ef` |
+| Action            | Packet                           |
+| ----------------- | -------------------------------- |
+| turn on           | `7e 04 04 f0 00 01 ff 00 ef`     |
+| turn off          | `7e 04 04 00 00 00 ff 00 ef`     |
+| color             | `7e 00 05 03 r g b 00 ef`        |
+| white             | `7e 00 01 i 00 00 00 00 ef`      |
+| brightness        | `7e 04 01 i ff 00 ff 00 ef`      |
+| speed             | `7e 00 02 v 00 00 00 00 ef`      |
+| effect            | `7e 00 03 v 03 00 00 00 ef`      |
 | color temperature | `7e 00 05 02 warm cold 00 00 ef` |
 
 For ELK-BLEDDM the write characteristic is `0000fff3-…` and notify is `0000fff4-…`. Other models use different UUIDs, so the characteristic is located by walking the services instead of guessing the service UUID.
@@ -233,7 +277,8 @@ Tests need no hardware: they cover packet building (reference bytes captured fro
 ## Gotchas
 
 - **The phone.** The app holds the connection, so the strip does not advertise. Close the app.
-- **A single connection.** A BLE peripheral accepts one client. A running MCP server with a warm connection occupies the strip: the CLI cannot connect at that moment (and vice versa).
+- **One client per strip.** A BLE peripheral accepts a single client. A running MCP server with a warm connection occupies that strip: the CLI cannot connect to it at that moment (and vice versa). Different strips are independent and can be connected at the same time.
+- **Names are not reliable.** BLE device names are arbitrary and do **not** have to start with "BLE" (e.g. `ELK-BLEDDM`, `LEDBLE-…`, `Triones-…`, or a random string). Use the hint in `ble_scan` / `ble_add_device` to tell strips apart, and prefer the MAC address as the durable key.
 - **BlueZ cache.** `adapter.devices()` also returns stale entries. In `scan` such devices have no RSSI and are marked as "from cache".
 - **`--warm 0` (CLI default).** The CLI disconnects right after the command. For a series of fast commands use either `--warm 60000` or the MCP server.
 - **App and MCP at the same time.** Capturing the app's protocol (`watch`) only works while our side is not writing: the controller echoes commands but never sends anything passively.
