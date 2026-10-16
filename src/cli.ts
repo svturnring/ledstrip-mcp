@@ -13,17 +13,7 @@
 import { Command } from "commander"
 
 import { BleLed, type BleLedOptions } from "./ble.js"
-import {
-    addDevice,
-    configPath,
-    listDevices,
-    loadConfig,
-    removeDevice,
-    saveConfig,
-    setDefaultDevice,
-    unsetConfig,
-    type BleConfig,
-} from "./config.js"
+import { addDevice, configPath, defaultDevice, listDevices, removeDevice, setDefaultDevice } from "./config.js"
 import { log, setVerbose } from "./log.js"
 import { listModels, parseColor, parseHexPacket, settleMsFor, type DecodedPacket } from "./protocol.js"
 interface GlobalOptions {
@@ -366,72 +356,30 @@ export function createProgram(): Command {
         })
 
     program
-        .command("config")
-        .description("показать или изменить сохранённую конфигурацию")
-        .option("--set-address <mac>", "сохранить MAC-адрес")
-        .option("--set-name <name>", "сохранить имя для поиска")
-        .option("--set-model <model>", "сохранить модель")
-        .option("--unset <fields...>", "убрать поля: address, name, model")
-        .action((cmd: { setAddress?: string; setName?: string; setModel?: string; unset?: string[] }) => {
-            const opts = globals()
-            let config: BleConfig = loadConfig()
-
-            if (cmd.unset && cmd.unset.length > 0) {
-                const allowed: (keyof BleConfig)[] = ["address", "name", "model"]
-                const keys = cmd.unset.filter((key): key is keyof BleConfig => (allowed as string[]).includes(key))
-                if (keys.length !== cmd.unset.length) {
-                    throw new Error(`--unset принимает только: ${allowed.join(", ")}`)
-                }
-                config = unsetConfig(keys)
-            }
-
-            if (cmd.setAddress || cmd.setName || cmd.setModel) {
-                config = saveConfig({ address: cmd.setAddress, name: cmd.setName, model: cmd.setModel })
-            }
-
-            print(opts, { path: configPath(), config }, (data) =>
-                Object.keys(data.config).length === 0
-                    ? `${data.path}\n(пусто)`
-                    : `${data.path}\n${JSON.stringify(data.config, null, 2)}`,
-            )
-        })
-
-    program
         .command("devices")
         .description("список сохранённых лент (алиас → адрес/имя/модель), * — по умолчанию")
         .action(() => {
             const opts = globals()
-            const config = loadConfig()
-            const devices = config.devices ?? {}
-            const def = config.default ?? null
-            const fallback =
-                !def && (config.address || config.name || config.model)
-                    ? { address: config.address ?? null, name: config.name ?? null, model: config.model ?? null }
-                    : null
-            print(opts, { path: configPath(), default: def, fallback, devices }, (data) => {
+            const devices = listDevices()
+            const def = defaultDevice() ?? null
+            print(opts, { path: configPath(), default: def, devices }, (data) => {
                 const aliases = Object.keys(data.devices).sort()
-                if (aliases.length === 0 && !data.fallback) {
+                if (aliases.length === 0) {
                     return (
                         "Сохранённых лент нет.\n" +
                         "Сначала найди адрес:  ble-mcp scan\n" +
                         "Затем привяжи:        ble-mcp attach <имя> <MAC>   (например: attach спальня AA:BB:CC:DD:EE:FF)"
                     )
                 }
-                const lines = aliases.map((alias) => {
-                    const entry = data.devices[alias]
-                    const mark = alias === data.default ? "*" : " "
-                    const where = entry?.address ?? (entry?.name ? `по имени ${entry.name}` : "адрес неизвестен")
-                    const model = entry?.model ? ` [${entry.model}]` : ""
-                    return `${mark} ${alias.padEnd(16)} ${where}${model}`
-                })
-                if (data.fallback) {
-                    const where =
-                        data.fallback.address ??
-                        (data.fallback.name ? `по имени ${data.fallback.name}` : "адрес неизвестен")
-                    const model = data.fallback.model ? ` [${data.fallback.model}]` : ""
-                    lines.unshift(`* (по умолчанию)  ${where}${model}`)
-                }
-                return lines.join("\n")
+                return aliases
+                    .map((alias) => {
+                        const entry = data.devices[alias]
+                        const mark = alias === data.default ? "*" : " "
+                        const where = entry?.address ?? (entry?.name ? `по имени ${entry.name}` : "адрес неизвестен")
+                        const model = entry?.model ? ` [${entry.model}]` : ""
+                        return `${mark} ${alias.padEnd(16)} ${where}${model}`
+                    })
+                    .join("\n")
             })
         })
 

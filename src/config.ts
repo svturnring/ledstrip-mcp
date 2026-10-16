@@ -1,14 +1,9 @@
 /**
- * Configuration: device addresses/names/models and freely named devices.
+ * Configuration: named devices.
  *
- * Stored in ~/.config/ble-mcp/config.json (overridable via BLE_MCP_CONFIG_DIR).
- * Values can also come from environment variables — handy for agent MCP configs
- * where writing a file is undesirable.
- *
- * Two shapes coexist for backward compatibility:
- *   - the legacy single-device fields (address/name/model);
- *   - a `devices` map of named devices (alias → address/name/model) plus an
- *     optional `default` alias. This is what enables multi-strip setups:
+ * Stored in ~/.config/ble-mcp/config.json (the directory can be overridden with
+ * BLE_MCP_CONFIG_DIR). There is exactly one format — a map of named devices plus
+ * an optional default:
  *
  *       {
  *         "default": "спальня",
@@ -17,25 +12,27 @@
  *           "спальня":  { "address": "AA:BB:CC:DD:EE:02", "name": "ELK-BLEDOM" }
  *         }
  *       }
+ *
+ * Every strip is addressed by its alias ("спальня"): commands take a `device`,
+ * and per-call address/name/model arguments exist only for one-off runs and are
+ * never persisted.
  */
 
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-import { DEFAULT_MODEL_NAME } from "./protocol.js"
-
 /** A single named device entry. */
 export interface BleDeviceEntry {
     /** Device MAC address, e.g. AA:BB:CC:DD:EE:01. */
     address?: string
-    /** Name from the advertisement used for discovery, e.g. ELK-BLEDDM. */
+    /** Advertising name used for discovery, e.g. ELK-BLEDDM. */
     name?: string
     /** Forced model from the registry (if auto-detection gets it wrong). */
     model?: string
 }
 
-export interface BleConfig extends BleDeviceEntry {
+export interface BleConfig {
     /** Alias of the default device (a key in `devices`). */
     default?: string
     /** Named devices: alias → entry. */
@@ -46,7 +43,7 @@ export interface Target {
     address?: string
     name: string
     model?: string
-    /** Alias of the device in the config (set when resolved via a named device). */
+    /** Alias of the resolved named device (set when resolved via a named device). */
     device?: string
 }
 
@@ -80,11 +77,8 @@ function writeConfig(config: BleConfig): void {
     }
 }
 
-/** Drop empty scalar/entry fields so the file stays tidy. */
+/** Drop empty entry fields and a dangling default so the file stays tidy. */
 function prune(config: BleConfig): BleConfig {
-    for (const key of ["address", "name", "model", "default"] as const) {
-        if (config[key] === undefined || config[key] === "") delete config[key]
-    }
     if (config.devices) {
         for (const [alias, entry] of Object.entries(config.devices)) {
             for (const key of ["address", "name", "model"] as const) {
@@ -94,16 +88,8 @@ function prune(config: BleConfig): BleConfig {
         }
         if (Object.keys(config.devices).length === 0) delete config.devices
     }
+    if (config.default && !config.devices?.[config.default]) delete config.default
     return config
-}
-
-/** Merge fields into the config (the rest is preserved) and write it back. */
-export function saveConfig(patch: BleConfig): BleConfig {
-    const current = loadConfig()
-    const merged: BleConfig = { ...current, ...patch }
-    if (patch.devices) merged.devices = { ...current.devices, ...patch.devices }
-    writeConfig(prune(merged))
-    return merged
 }
 
 /** All named devices (alias → entry). */
@@ -118,8 +104,8 @@ export function defaultDevice(): string | undefined {
 
 /**
  * Attach (or update) a named device. A non-empty alias is required; the entry
- * is merged over any existing one, so `attach "спальня" --default` alone just
- * makes it the default.
+ * is merged over any existing one, so `attach "спальня"` alone only ensures the
+ * device exists.
  */
 export function addDevice(alias: string, entry: BleDeviceEntry, options: { makeDefault?: boolean } = {}): BleConfig {
     const name = alias.trim()
@@ -131,14 +117,6 @@ export function addDevice(alias: string, entry: BleDeviceEntry, options: { makeD
     if (options.makeDefault) config.default = name
     writeConfig(prune(config))
     return config
-}
-
-/** Remove legacy single-device fields from the config. */
-export function unsetConfig(keys: (keyof BleConfig)[]): BleConfig {
-    const current = loadConfig()
-    for (const key of keys) delete current[key]
-    writeConfig(prune(current))
-    return current
 }
 
 /** Detach a named device. */
@@ -166,8 +144,7 @@ export function setDefaultDevice(alias: string): BleConfig {
 
 /**
  * Effective target, in priority order:
- *   explicit arguments → named device (`device` alias) → environment →
- *   legacy single-device config → default.
+ *   explicit arguments → named device (`device` alias) → environment → error.
  *
  * A `device` alias can come from the caller, from BLE_MCP_DEVICE, or from the
  * config's `default`. An unknown alias is an error, so a typo never silently
@@ -187,10 +164,18 @@ export function resolveTarget(overrides: Partial<Target> = {}): Target {
         )
     }
 
-    return {
-        device: entry ? alias : undefined,
-        address: overrides.address ?? entry?.address ?? env.BLE_MCP_ADDRESS ?? config.address,
-        name: overrides.name ?? entry?.name ?? env.BLE_MCP_NAME ?? config.name ?? DEFAULT_MODEL_NAME,
-        model: overrides.model ?? entry?.model ?? env.BLE_MCP_MODEL ?? config.model,
+    const address = overrides.address ?? entry?.address ?? env.BLE_MCP_ADDRESS
+    const name = overrides.name ?? entry?.name ?? env.BLE_MCP_NAME ?? ""
+    const model = overrides.model ?? entry?.model ?? env.BLE_MCP_MODEL
+
+    if (!address && !name) {
+        const known = Object.keys(config.devices ?? {})
+        throw new Error(
+            known.length
+                ? `устройство не задано. Укажи device (-D / аргумент device) или настрой default (сейчас: ${known.join(", ")}).`
+                : "устройства ещё не привязаны: сделай scan, затем attach / ble_add_device.",
+        )
     }
+
+    return { device: entry ? alias : undefined, address, name, model }
 }

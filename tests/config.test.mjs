@@ -97,11 +97,16 @@ test("resolveTarget ругается на неизвестный алиас", ()
     assert.throws(() => resolveTarget({ device: "кухня" }), /не найдено в конфиге/)
 })
 
-test("resolveTarget понимает старый одиночный конфиг", () => {
-    seed({ address: "AA:BB:CC:DD:EE:09", name: "ELK-BLEDDM" })
-    const target = resolveTarget()
+test("resolveTarget без настроенных устройств даёт понятную ошибку", () => {
+    seed({})
+    assert.throws(() => resolveTarget(), /устройства ещё не привязаны/)
+})
+
+test("resolveTarget: ad-hoc аргументы работают без конфига", () => {
+    seed({})
+    const target = resolveTarget({ address: "AA:BB:CC:DD:EE:09", model: "ELK-BLEDOM" })
     assert.equal(target.address, "AA:BB:CC:DD:EE:09")
-    assert.equal(target.name, "ELK-BLEDDM")
+    assert.equal(target.model, "ELK-BLEDOM")
     assert.equal(target.device, undefined)
 })
 

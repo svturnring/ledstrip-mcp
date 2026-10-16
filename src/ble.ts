@@ -23,7 +23,7 @@
 import { createBluetooth } from "node-ble"
 import type { Adapter, Bluetooth, Device, GattCharacteristic, GattServer } from "node-ble"
 
-import { addDevice, configPath, resolveTarget, saveConfig, type BleConfig, type Target } from "./config.js"
+import { addDevice, configPath, resolveTarget, type BleConfig, type Target } from "./config.js"
 import { debug, log } from "./log.js"
 import { Protocol, classifyDeviceName, decodePacket, formatHex, sleep, type DecodedPacket } from "./protocol.js"
 
@@ -150,16 +150,6 @@ export class BleLed {
 
     constructor(private readonly options: BleLedOptions = {}) {
         this.target = options.target ?? {}
-    }
-
-    /** Change the base target (address/name/model/device). Closes the affected connection on change. */
-    async configure(target: Partial<Target>): Promise<void> {
-        const previous = this.resolve()
-        this.target = { ...this.target, ...target }
-        const next = this.resolve()
-        const changed =
-            previous.address !== next.address || previous.name !== next.name || previous.device !== next.device
-        if (changed) await this.closeTarget(previous)
     }
 
     private resolve(extra?: Partial<Target>): Target {
@@ -301,11 +291,11 @@ export class BleLed {
                 }
                 this.conns.set(address, conn)
 
-                // Remember the discovered address so future connections go straight to it.
-                if (target.address !== address) {
+                // Remember the discovered address on the named device so future
+                // connections go straight to it (ad-hoc targets are not saved).
+                if (target.device && target.address !== address) {
                     try {
-                        if (target.device) addDevice(target.device, { address, name: discoveredName })
-                        else saveConfig({ address, name: discoveredName })
+                        addDevice(target.device, { address, name: discoveredName })
                     } catch (error) {
                         debug(`не удалось сохранить адрес в конфиг: ${errorText(error)}`)
                     }

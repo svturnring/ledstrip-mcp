@@ -23,7 +23,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod"
 
 import { BleLed } from "./ble.js"
-import { addDevice, configPath, listDevices, loadConfig, removeDevice, saveConfig, type Target } from "./config.js"
+import { addDevice, configPath, defaultDevice, listDevices, removeDevice, type Target } from "./config.js"
 import { debug, log, protectStdout } from "./log.js"
 import { listModels, parseColor, parseHexPacket, settleMsFor } from "./protocol.js"
 
@@ -304,13 +304,8 @@ export function registerTools(server: McpServer, led: BleLed): void {
             inputSchema: {},
         },
         guard(async () => {
-            const config = loadConfig()
-            const devices = config.devices ?? {}
-            const def = config.default ?? null
-            const fallback =
-                !def && (config.address || config.name || config.model)
-                    ? { address: config.address ?? null, name: config.name ?? null, model: config.model ?? null }
-                    : null
+            const devices = listDevices()
+            const def = defaultDevice() ?? null
             const live = new Map((await led.connections()).map((item) => [item.address, item]))
             const view = Object.entries(devices)
                 .sort(([a], [b]) => a.localeCompare(b))
@@ -326,9 +321,9 @@ export function registerTools(server: McpServer, led: BleLed): void {
                     }
                 })
             return ok(
-                { default: def, fallback, count: view.length, devices: view },
-                view.length || fallback
-                    ? `Сохранено лент: ${view.length}${fallback ? " + устройство по умолчанию" : ""}.`
+                { default: def, count: view.length, devices: view },
+                view.length
+                    ? `Сохранено лент: ${view.length}.`
                     : "Сохранённых лент нет — найди устройства (ble_scan) и привяжи их (ble_add_device).",
             )
         }),
@@ -381,30 +376,6 @@ export function registerTools(server: McpServer, led: BleLed): void {
             return ok(
                 { path: configPath(), device, removed, default: config.default ?? null },
                 `Лента «${device}» отвязана.`,
-            )
-        }),
-    )
-
-    server.registerTool(
-        "ble_configure",
-        {
-            title: "Настроить адрес/имя/модель по умолчанию",
-            description:
-                `Сохранить параметры устройства по умолчанию в ${configPath()}. Для нескольких лент используй ble_add_device. ` +
-                "Указывай address после успешного ble_scan, чтобы подключение было быстрым (без поиска по имени). " +
-                "Модель задавай вручную только если автоопределение ошибается.",
-            inputSchema: {
-                address: z.string().optional().describe("MAC-адрес, например AA:BB:CC:DD:EE:FF"),
-                name: z.string().optional().describe("Имя устройства в эфире, например ELK-BLEDDM"),
-                model: z.string().optional().describe("Модель из ble_list_models"),
-            },
-        },
-        guard(async ({ address, name, model }) => {
-            const config = saveConfig({ address, name, model })
-            await led.configure({ address, name, model })
-            return ok(
-                { path: configPath(), config },
-                "Конфигурация сохранена. Следующее подключение применит её автоматически.",
             )
         }),
     )

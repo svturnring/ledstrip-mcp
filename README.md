@@ -82,7 +82,26 @@ The same works from an agent: `ble_scan` → `ble_add_device` → the control to
 
 ## CLI
 
-| `scan [-d seconds]` | scan the air: show RSSI, freshness (live or from the BlueZ cache) and a hint on whether each device looks like an LED strip; the configured target is marked | | `status` | show the config and whether a connection is alive (does not connect) | | `info` | connect and show the GATT profile: services, characteristics, flags, detected model, settle delay | | `on` / `off` | turn the strip on / off | | `color <#rrggbb\|rrggbb\|r,g,b>` | set color | | `white <0-100>` | white light at the given brightness | | `brightness <0-100>` | set brightness | | `kelvin <K>` | color temperature (1800 K warm … 7000 K cool) | | `effect <n> [speed] [brightness]` | effect by index (0-127 standard, 128-135 mic modes) | | `speed <v>` | speed of the current effect | | `raw <hex>` | send an arbitrary packet, for debugging | | `watch [-d seconds]` | listen to the notify channel | | `models` | list supported controller models | | `devices` | list saved strips (* — default) | | `attach <alias> [mac]` | bind a strip under a name (`--dev-name`, `--dev-model`, `--default`) | | `detach <alias>` | unbind a strip | | `default <alias>` | switch the default strip | | `config [--set-address/--set-name/--set-model/--unset]` | show or change the legacy single-device config | | `serve [-t stdio\|http]` | start the MCP server |
+| Command | Description |
+| --- | --- |
+| `scan [-d seconds]` | scan the air: show RSSI, freshness (live or from the BlueZ cache) and a hint on whether each device looks like an LED strip; the configured target is marked |
+| `status` | show the config and whether a connection is alive (does not connect) |
+| `info` | connect and show the GATT profile: services, characteristics, flags, detected model, settle delay |
+| `on` / `off` | turn the strip on / off |
+| `color <#rrggbb\|rrggbb\|r,g,b>` | set color |
+| `white <0-100>` | white light at the given brightness |
+| `brightness <0-100>` | set brightness |
+| `kelvin <K>` | color temperature (1800 K warm … 7000 K cool) |
+| `effect <n> [speed] [brightness]` | effect by index (0-127 standard, 128-135 mic modes) |
+| `speed <v>` | speed of the current effect |
+| `raw <hex>` | send an arbitrary packet, for debugging |
+| `watch [-d seconds]` | listen to the notify channel |
+| `models` | list supported controller models |
+| `devices` | list saved strips (* — default) |
+| `attach <alias> [mac]` | bind a strip under a name (`--dev-name`, `--dev-model`, `--default`) |
+| `detach <alias>` | unbind a strip |
+| `default <alias>` | switch the default strip |
+| `serve [-t stdio\|http]` | start the MCP server |
 
 Global options: `-a/--address`, `-n/--name`, `-m/--model`, `-D/--device <alias>`, `--timeout <ms>` (how long to wait for the device), `--warm <ms>` (keep the connection alive for), `--json` (machine-readable output), `-v/--verbose`.
 
@@ -172,20 +191,17 @@ Connecting from opencode:
 | `ble_devices` | — | list saved strips, which is the default and which are connected |
 | `ble_add_device` | `device`, `address?`, `name?`, `model?`, `setDefault?` | bind a strip under a name |
 | `ble_remove_device` | `device` | unbind a strip |
-| `ble_configure` | `address?`, `name?`, `model?` | save the default device parameters (legacy single-device) |
 | `ble_list_models` | — | model registry |
 
 Every control tool accepts an optional **`device`** argument — the alias of a saved strip (e.g. `"bedroom"`). Without it, the default strip is used.
 
-A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` → `ble_add_device`/`ble_configure` → control commands with `device`. For several strips: `ble_scan` → `ble_add_device` per strip → `ble_set_color` with `device: "bedroom"`.
+A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` → `ble_add_device` per strip → control commands with `device`, e.g. `ble_set_color` with `device: "bedroom"`.
 
 ## Configuration
 
-Priority: **CLI arguments / tool arguments → environment variables → named device → config file → default**.
+Priority: **explicit arguments (CLI flags / tool args) → named device alias → environment variables → error**.
 
-File: `~/.config/ble-mcp/config.json` (the directory can be overridden with `BLE_MCP_CONFIG_DIR`).
-
-Named devices (`devices` map + `default` alias) are what `attach` / `ble_add_device` write:
+File: `~/.config/ble-mcp/config.json` (the directory can be overridden with `BLE_MCP_CONFIG_DIR`). There is a single format: a map of named devices plus an optional default. This is exactly what `attach` / `ble_add_device` write:
 
 ```json
 {
@@ -195,12 +211,6 @@ Named devices (`devices` map + `default` alias) are what `attach` / `ble_add_dev
         "bedroom": { "address": "AA:BB:CC:DD:EE:02", "model": "ELK-BLEDOM" }
     }
 }
-```
-
-The legacy single-device shape is still supported and acts as the default when no `default` alias is set:
-
-```json
-{ "address": "AA:BB:CC:DD:EE:FF", "name": "ELK-BLEDDM" }
 ```
 
 Environment variables: `BLE_MCP_ADDRESS`, `BLE_MCP_NAME`, `BLE_MCP_MODEL`, `BLE_MCP_DEVICE` (alias of the default strip), `BLE_MCP_VERBOSE=1`.
