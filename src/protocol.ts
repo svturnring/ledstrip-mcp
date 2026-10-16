@@ -1,0 +1,330 @@
+/**
+ * Protocol of BLE LED-strip controllers of the
+ * ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK family and compatible ones.
+ *
+ * A packet is 9 bytes, written WITHOUT response (write without response):
+ *
+ *     7E | type/length | cmd | payload ... | EF
+ *
+ * Why this needs its own layer instead of just "write the bytes":
+ *
+ *  1. The controller SWALLOWS a command that arrives before the settle delay
+ *     after the previous one (for ELK-BLEDDM that is ~300 ms, for ELK-BLEDOB
+ *     ~100 ms), and it does so silently — no error, no reply. Hence the
+ *     mandatory pause between writes.
+ *  2. The controller is write-only: for any request it sends an ECHO of our own
+ *     command on the notify channel instead of the real state. So "read
+ *     on/color/brightness" is impossible and the state has to be remembered
+ *     optimistically.
+ *  3. Different models have different command bytes, different characteristic
+ *     UUIDs and different versions of the same protocol (the registry lives in
+ *     models.ts).
+ */
+
+import { MODELS, settleMsFor, type ModelCommands, type ModelSpec, type Template } from "./models.js"
+
+/** Default service (some models use a different one, so the UUID comes from the model). */
+export const DEFAULT_WRITE_UUID = "0000fff3-0000-1000-8000-00805f9b34fb"
+export const DEFAULT_NOTIFY_UUID = "0000fff4-0000-1000-8000-00805f9b34fb"
+
+export const HEADER = 0x7e
+export const FOOTER = 0xef
+
+/** The model the default is configured for (our strip). */
+export const DEFAULT_MODEL_NAME = "ELK-BLEDDM"
+
+export type { ModelSpec, ModelCommands, Template, Byte, Placeholder } from "./models.js"
+export { settleMsFor, MODELS } from "./models.js"
+
+export interface Rgb {
+    r: number
+    g: number
+    b: number
+}
+
+/** Template placeholders → their numeric values. */
+export interface TemplateValues {
+    /** Red, 0-255. */
+    r?: number
+    /** Green, 0-255. */
+    g?: number
+    /** Blue, 0-255. */
+    b?: number
+    /** Intensity 0-255 (turned into percents 0-100 by the template). */
+    i?: number
+    /** Generic value (effect, speed). */
+    v?: number
+    /** Warm white, 0-100. */
+    w?: number
+    /** Cool white, 0-100. */
+    c?: number
+}
+
+export const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value))
+
+/** Percents 0-100 → intensity 0-255. */
+export const pctToIntensity = (pct: number): number => Math.round((clamp(pct, 0, 100) / 100) * 255)
+
+/** Intensity 0-255 → percents 0-100. */
+export const intensityToPct = (intensity: number): number => Math.round((clamp(intensity, 0, 255) / 255) * 100)
+
+/**
+ * Substitute values into a command template from the model registry.
+ *
+ * The only non-obvious detail: the `i` placeholder in models.json is defined on
+ * the 0-255 scale, while the controller expects percents 0-100 — the same
+ * conversion as in the HA integration (`int(intensity * 100 / 255)`).
+ */
+export function pack(template: Template, values: TemplateValues): Buffer {
+    const bytes = template.map((byte) => {
+        if (typeof byte === "number") return byte
+        const raw = values[byte]
+        if (raw === undefined) throw new Error(`в шаблоне команды не задан заполнитель "${byte}"`)
+        const value = byte === "i" ? (raw * 100) / 255 : raw
+        return clamp(Math.round(value), 0, 255)
+    })
+    return Buffer.from(bytes)
+}
+
+/** Find a model by device name (prefix, longest match, generic variant preferred). */
+export function findModel(deviceName: string | undefined): ModelSpec | undefined {
+    if (!deviceName) return undefined
+    const lower = deviceName.trim().toLowerCase()
+    const matches = MODELS.filter((model) => lower.startsWith(model.name.toLowerCase()))
+    if (matches.length === 0) return undefined
+    matches.sort((a, b) => b.name.length - a.name.length)
+    return matches.find((model) => model.handle === undefined) ?? matches[0]
+}
+
+export function listModels(): ModelSpec[] {
+    return [...MODELS].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * A wrapper over a model: builds concrete packets for a concrete strip.
+ */
+export class Protocol {
+    constructor(readonly model: ModelSpec) {}
+
+    /**
+     * Pick a model: explicit override → device name → default.
+     */
+    static forDevice(deviceName?: string, override?: string): Protocol {
+        const byOverride = findModel(override)
+        if (override && !byOverride) {
+            throw new Error(`модель "${override}" не найдена в реестре, список: ble-mcp models`)
+        }
+        return new Protocol(byOverride ?? findModel(deviceName) ?? (findModel(DEFAULT_MODEL_NAME) as ModelSpec))
+    }
+
+    get name(): string {
+        return this.model.name
+    }
+
+    get writeUuid(): string {
+        return this.model.write_uuid || DEFAULT_WRITE_UUID
+    }
+
+    get notifyUuid(): string {
+        return this.model.read_uuid ?? DEFAULT_NOTIFY_UUID
+    }
+
+    /** Mandatory pause between commands. */
+    get settleMs(): number {
+        return this.model.settle_ms ?? settleMsFor(this.model.name)
+    }
+
+    get colorTempRange(): { minKelvin: number; maxKelvin: number } {
+        return {
+            minKelvin: this.model.color_temp_range?.min_kelvin ?? 1800,
+            maxKelvin: this.model.color_temp_range?.max_kelvin ?? 7000,
+        }
+    }
+
+    private build(kind: keyof ModelCommands, values: TemplateValues, label: string): Buffer {
+        const template = this.model.commands[kind]
+        if (!template || template.length === 0) {
+            throw new Error(`модель ${this.name} не поддерживает команду «${label}»`)
+        }
+        return pack(template, values)
+    }
+
+    turnOn(): Buffer {
+        return this.build("turn_on", {}, "включить")
+    }
+
+    turnOff(): Buffer {
+        return this.build("turn_off", {}, "выключить")
+    }
+
+    color({ r, g, b }: Rgb): Buffer {
+        return this.build("color", { r, g, b }, "цвет")
+    }
+
+    /** White light, percents 0-100. */
+    white(pct: number): Buffer {
+        return this.build("white", { i: pctToIntensity(pct) }, "белый")
+    }
+
+    /** Brightness, percents 0-100. */
+    brightness(pct: number): Buffer {
+        return this.build("brightness", { i: pctToIntensity(pct) }, "яркость")
+    }
+
+    /** Effect index (0-127 on most models, 128-135 are mic modes). */
+    effect(value: number): Buffer {
+        const max = this.model.effect_range?.max ?? 255
+        return this.build("effect", { v: clamp(Math.round(value), 0, max) }, "эффект")
+    }
+
+    /** Effect speed. */
+    speed(value: number): Buffer {
+        const min = this.model.effect_speed_range?.min ?? 0
+        const max = this.model.effect_speed_range?.max ?? 255
+        return this.build("effect_speed", { v: clamp(Math.round(value), min, max) }, "скорость эффекта")
+    }
+
+    /** Color temperature: 1800K (warm) … 7000K (cool). */
+    colorTemp(kelvin: number): Buffer {
+        const { minKelvin, maxKelvin } = this.colorTempRange
+        const t =
+            maxKelvin > minKelvin ? (clamp(kelvin, minKelvin, maxKelvin) - minKelvin) / (maxKelvin - minKelvin) : 1
+        return this.build(
+            "color_temp",
+            { w: Math.round((1 - t) * 100), c: Math.round(t * 100) },
+            "цветовая температура",
+        )
+    }
+
+    /** Arbitrary packet (whatever the user gave in hex). */
+    raw(bytes: Uint8Array): Buffer {
+        return Buffer.from(bytes)
+    }
+}
+
+// --- Parsing user input ---------------------------------------------------
+
+/** `#ff8800` | `ff8800` | `255,136,0` | `255 136 0` → RGB. */
+export function parseColor(value: string): Rgb {
+    const cleaned = value.trim().replace(/^#/, "")
+    if (/^[0-9a-fA-F]{6}$/.test(cleaned)) {
+        return {
+            r: parseInt(cleaned.slice(0, 2), 16),
+            g: parseInt(cleaned.slice(2, 4), 16),
+            b: parseInt(cleaned.slice(4, 6), 16),
+        }
+    }
+    if (/^[0-9a-fA-F]{3}$/.test(cleaned)) {
+        const [r, g, b] = cleaned.split("")
+        return {
+            r: parseInt(`${r}${r}`, 16),
+            g: parseInt(`${g}${g}`, 16),
+            b: parseInt(`${b}${b}`, 16),
+        }
+    }
+    const parts = cleaned.split(/[,\s]+/).filter(Boolean)
+    if (parts.length === 3 && parts.every((part) => /^\d{1,3}$/.test(part))) {
+        const rgb = parts.map(Number) as [number, number, number]
+        if (rgb.every((v) => v >= 0 && v <= 255)) return { r: rgb[0], g: rgb[1], b: rgb[2] }
+    }
+    throw new Error(`не удалось разобрать цвет "${value}": ожидается #rrggbb, rrggbb или 255,136,0`)
+}
+
+/** `7e 04 04 f0 00 01 ff 00 ef` | `0x7e,0x04,...` | `7e0404f000 01ff00ef` → bytes. */
+export function parseHexPacket(value: string): Buffer {
+    const cleaned = value
+        .trim()
+        .replace(/0x/gi, "")
+        .replace(/[,\s]+/g, " ")
+        .trim()
+    let hex: string
+    if (cleaned.includes(" ")) {
+        // Bytes separated by spaces/commas: concatenate as-is.
+        hex = cleaned.split(" ").join("")
+        if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
+            throw new Error(`не удалось разобрать hex "${value}": каждый байт — две hex-цифры`)
+        }
+    } else {
+        // A solid string: pairs without separators are allowed.
+        if (!/^[0-9a-fA-F]+$/.test(cleaned) || cleaned.length % 2 !== 0) {
+            throw new Error(`не удалось разобрать hex "${value}": нужна чётная длина`)
+        }
+        hex = cleaned
+    }
+    const bytes = hex.match(/../g) ?? []
+    if (bytes.length === 0) throw new Error(`не удалось разобрать hex "${value}"`)
+    return Buffer.from(bytes.map((byte) => parseInt(byte, 16)))
+}
+
+export function formatHex(data: Uint8Array): string {
+    return Array.from(data, (byte) => byte.toString(16).padStart(2, "0")).join(" ")
+}
+
+// --- Decoding incoming notifications --------------------------------------
+
+export interface DecodedPacket {
+    /** Receive time (ISO). */
+    at: string
+    /** Bytes in hex. */
+    raw: string
+    /** Whether it looks like a protocol packet (7E … EF, 9 bytes). */
+    isPacket: boolean
+    /** Second command byte (index 2), if this is a packet. */
+    cmd?: number
+    /** Whether it looks like an echo of our own command (the controller almost always answers this way). */
+    looksLikeEcho?: boolean
+    /** Decoded state, if the controller did report state after all (cmd = 0x01). */
+    state?: {
+        on: boolean
+        rgb?: Rgb
+        rgbHex?: string
+        brightnessPct?: number
+    }
+}
+
+/**
+ * Decode whatever arrived on the notify channel.
+ *
+ * The controller reports real state only in a packet with cmd = 0x01; everything
+ * else is an echo of the command we sent (normal for BLEDDM/BLEDOM).
+ */
+export function decodePacket(data: Uint8Array): DecodedPacket {
+    const bytes = Array.from(data)
+    const packet: DecodedPacket = {
+        at: new Date().toISOString(),
+        raw: formatHex(data),
+        isPacket: bytes.length >= 9 && bytes[0] === HEADER && bytes[bytes.length - 1] === FOOTER,
+    }
+    if (!packet.isPacket) return packet
+
+    packet.cmd = bytes[2]
+    if (bytes[2] === 0x01) {
+        const state: NonNullable<DecodedPacket["state"]> = { on: [0x23, 0xf0, 0x01].includes(bytes[3] ?? 0xff) }
+        const [r, g, b, brightness] = [bytes[4], bytes[5], bytes[6], bytes[7]]
+        if (!(r === 0xff && g === 0xff && b === 0xff) && r !== undefined && g !== undefined && b !== undefined) {
+            state.rgb = { r, g, b }
+            state.rgbHex = `#${formatHex(Uint8Array.from([r, g, b])).replace(/ /g, "")}`
+        }
+        if (brightness !== undefined && brightness !== 0xff) state.brightnessPct = brightness
+        packet.state = state
+    } else {
+        packet.looksLikeEcho = true
+    }
+    return packet
+}
+
+// --- Misc -----------------------------------------------------------------
+
+export function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+        setTimeout(resolve, ms)
+    })
+}
+
+/**
+ * Read the manufacturer name from the device name — not needed, but useful for
+ * error messages: it shows exactly what was searched for.
+ */
+export function describeTarget(address: string | undefined, name: string): string {
+    return address ? `${name} (${address})` : name
+}
