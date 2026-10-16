@@ -67,9 +67,13 @@ export function loadConfig(): BleConfig {
     }
 }
 
+/** Write only the known keys so the file always has exactly one shape. */
 function writeConfig(config: BleConfig): void {
+    const out: BleConfig = {}
+    if (config.default) out.default = config.default
+    if (config.devices) out.devices = config.devices
     mkdirSync(configDir(), { recursive: true })
-    writeFileSync(configPath(), `${JSON.stringify(config, null, 2)}\n`, "utf8")
+    writeFileSync(configPath(), `${JSON.stringify(out, null, 2)}\n`, "utf8")
     try {
         chmodSync(configPath(), 0o600)
     } catch {
