@@ -16,6 +16,7 @@ import { BleLed, type BleLedOptions } from "./ble.js"
 import { addDevice, configPath, defaultDevice, listDevices, removeDevice, setDefaultDevice } from "./config.js"
 import { log, setVerbose } from "./log.js"
 import { listModels, parseColor, parseHexPacket, settleMsFor, type DecodedPacket } from "./protocol.js"
+import { VERSION } from "./version.js"
 interface GlobalOptions {
     address?: string
     name?: string
@@ -26,8 +27,6 @@ interface GlobalOptions {
     json?: boolean
     verbose?: boolean
 }
-
-const VERSION = "0.1.0"
 
 function toMilliseconds(value: string, flag: string): number {
     const seconds = Number(value)

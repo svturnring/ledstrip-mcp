@@ -239,6 +239,7 @@ src/models.ts    — model registry (generated from models/models.json)
 src/protocol.ts  — packet building/parsing, input parsers, model detection, device-name classifier
 src/config.ts    — config: named devices, priority rules
 src/log.ts       — logging, always to stderr
+src/version.ts   — the package version, read from package.json at runtime
 src/ble.ts       — transport: discovery, connection pool (one per strip), write, notify, retries, release after a command (optional warm window)
 src/cli.ts       — CLI (commander)
 src/mcp.ts       — MCP server (stdio + streamable HTTP)

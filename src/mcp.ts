@@ -31,8 +31,7 @@ import { BleLed, type CommandResult } from "./ble.js"
 import { addDevice, configPath, defaultDevice, listDevices, removeDevice, type Target } from "./config.js"
 import { debug, log, protectStdout } from "./log.js"
 import { listModels, parseColor, parseHexPacket, settleMsFor, type Protocol } from "./protocol.js"
-
-const VERSION = "0.1.0"
+import { VERSION } from "./version.js"
 
 /** Response: both text for a human and structured data for the agent. */
 interface ToolResponse {
