@@ -79,7 +79,7 @@ export function pack(template: Template, values: TemplateValues): Buffer {
     const bytes = template.map((byte) => {
         if (typeof byte === "number") return byte
         const raw = values[byte]
-        if (raw === undefined) throw new Error(`в шаблоне команды не задан заполнитель "${byte}"`)
+        if (raw === undefined) throw new Error(`command template has no placeholder for byte "${byte}"`)
         const value = byte === "i" ? (raw * 100) / 255 : raw
         return clamp(Math.round(value), 0, 255)
     })
@@ -120,16 +120,16 @@ export interface DeviceGuess {
  * so this is only a hint, never a guarantee.
  */
 const LED_NAME_PATTERNS: { pattern: RegExp; hint: string }[] = [
-    { pattern: /^elk[-_ ]?ble/i, hint: "префикс ELK — контроллер ELK-BLED*" },
-    { pattern: /^melk/i, hint: "префикс MELK" },
+    { pattern: /^elk[-_ ]?ble/i, hint: "ELK prefix — an ELK-BLED* controller" },
+    { pattern: /^melk/i, hint: "MELK prefix" },
     { pattern: /ledble/i, hint: "LEDBLE" },
     { pattern: /lednet/i, hint: "LEDnet" },
-    { pattern: /triones/i, hint: "приложение Triones" },
+    { pattern: /triones/i, hint: "Triones app" },
     { pattern: /happy[-_ ]?light/i, hint: "HappyLighting" },
     { pattern: /magic[-_ ]?(home|light)/i, hint: "MagicHome/MagicLight" },
-    { pattern: /qhm/i, hint: "префикс QHM" },
-    { pattern: /(^|[-_ ])led([-_ ]|\d|$)/i, hint: "в имени есть LED" },
-    { pattern: /light|strip|лента/i, hint: "в имени есть light/strip" },
+    { pattern: /qhm/i, hint: "QHM prefix" },
+    { pattern: /(^|[-_ ])led([-_ ]|\d|$)/i, hint: "name contains LED" },
+    { pattern: /light|strip|[\u0400-\u04FF]/i, hint: "name contains light/strip" },
 ]
 
 /**
@@ -144,7 +144,7 @@ export function classifyDeviceName(name: string | undefined): DeviceGuess {
         return {
             likely: false,
             confidence: "unlikely",
-            hint: "у устройства нет имени в рекламе — определить на глаз нельзя, ориентируйся на RSSI и адрес",
+            hint: "the device advertises no name — it cannot be identified by eye; go by RSSI and address",
         }
     }
     const model = findModel(trimmed)
@@ -153,18 +153,18 @@ export function classifyDeviceName(name: string | undefined): DeviceGuess {
             likely: true,
             confidence: "model",
             model: model.name,
-            hint: `известная модель из реестра: ${model.name}`,
+            hint: `known model from the registry: ${model.name}`,
         }
     }
     for (const { pattern, hint } of LED_NAME_PATTERNS) {
         if (pattern.test(trimmed)) {
-            return { likely: true, confidence: "name", hint: `похоже на LED-контроллер: ${hint}` }
+            return { likely: true, confidence: "name", hint: `looks like an LED controller: ${hint}` }
         }
     }
     return {
         likely: false,
         confidence: "unlikely",
-        hint: "не похоже на LED-контроллер по имени — возможно, другое устройство",
+        hint: "the name does not look like an LED controller — possibly a different device",
     }
 }
 
@@ -180,7 +180,7 @@ export class Protocol {
     static forDevice(deviceName?: string, override?: string): Protocol {
         const byOverride = findModel(override)
         if (override && !byOverride) {
-            throw new Error(`модель "${override}" не найдена в реестре, список: ble-mcp models`)
+            throw new Error(`model "${override}" is not in the registry, see: ble-mcp models`)
         }
         return new Protocol(byOverride ?? findModel(deviceName) ?? (findModel(DEFAULT_MODEL_NAME) as ModelSpec))
     }
@@ -212,44 +212,44 @@ export class Protocol {
     private build(kind: keyof ModelCommands, values: TemplateValues, label: string): Buffer {
         const template = this.model.commands[kind]
         if (!template || template.length === 0) {
-            throw new Error(`модель ${this.name} не поддерживает команду «${label}»`)
+            throw new Error(`model ${this.name} does not support the command "${label}"`)
         }
         return pack(template, values)
     }
 
     turnOn(): Buffer {
-        return this.build("turn_on", {}, "включить")
+        return this.build("turn_on", {}, "turn on")
     }
 
     turnOff(): Buffer {
-        return this.build("turn_off", {}, "выключить")
+        return this.build("turn_off", {}, "turn off")
     }
 
     color({ r, g, b }: Rgb): Buffer {
-        return this.build("color", { r, g, b }, "цвет")
+        return this.build("color", { r, g, b }, "color")
     }
 
     /** White light, percents 0-100. */
     white(pct: number): Buffer {
-        return this.build("white", { i: pctToIntensity(pct) }, "белый")
+        return this.build("white", { i: pctToIntensity(pct) }, "white")
     }
 
     /** Brightness, percents 0-100. */
     brightness(pct: number): Buffer {
-        return this.build("brightness", { i: pctToIntensity(pct) }, "яркость")
+        return this.build("brightness", { i: pctToIntensity(pct) }, "brightness")
     }
 
     /** Effect index (0-127 on most models, 128-135 are mic modes). */
     effect(value: number): Buffer {
         const max = this.model.effect_range?.max ?? 255
-        return this.build("effect", { v: clamp(Math.round(value), 0, max) }, "эффект")
+        return this.build("effect", { v: clamp(Math.round(value), 0, max) }, "effect")
     }
 
     /** Effect speed. */
     speed(value: number): Buffer {
         const min = this.model.effect_speed_range?.min ?? 0
         const max = this.model.effect_speed_range?.max ?? 255
-        return this.build("effect_speed", { v: clamp(Math.round(value), min, max) }, "скорость эффекта")
+        return this.build("effect_speed", { v: clamp(Math.round(value), min, max) }, "effect speed")
     }
 
     /** Color temperature: 1800K (warm) … 7000K (cool). */
@@ -257,11 +257,7 @@ export class Protocol {
         const { minKelvin, maxKelvin } = this.colorTempRange
         const t =
             maxKelvin > minKelvin ? (clamp(kelvin, minKelvin, maxKelvin) - minKelvin) / (maxKelvin - minKelvin) : 1
-        return this.build(
-            "color_temp",
-            { w: Math.round((1 - t) * 100), c: Math.round(t * 100) },
-            "цветовая температура",
-        )
+        return this.build("color_temp", { w: Math.round((1 - t) * 100), c: Math.round(t * 100) }, "color temperature")
     }
 
     /** Arbitrary packet (whatever the user gave in hex). */
@@ -295,7 +291,7 @@ export function parseColor(value: string): Rgb {
         const rgb = parts.map(Number) as [number, number, number]
         if (rgb.every((v) => v >= 0 && v <= 255)) return { r: rgb[0], g: rgb[1], b: rgb[2] }
     }
-    throw new Error(`не удалось разобрать цвет "${value}": ожидается #rrggbb, rrggbb или 255,136,0`)
+    throw new Error(`could not parse color "${value}": expected #rrggbb, rrggbb or 255,136,0`)
 }
 
 /** `7e 04 04 f0 00 01 ff 00 ef` | `0x7e,0x04,...` | `7e0404f000 01ff00ef` → bytes. */
@@ -310,17 +306,17 @@ export function parseHexPacket(value: string): Buffer {
         // Bytes separated by spaces/commas: concatenate as-is.
         hex = cleaned.split(" ").join("")
         if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
-            throw new Error(`не удалось разобрать hex "${value}": каждый байт — две hex-цифры`)
+            throw new Error(`could not parse hex "${value}": every byte needs two hex digits`)
         }
     } else {
         // A solid string: pairs without separators are allowed.
         if (!/^[0-9a-fA-F]+$/.test(cleaned) || cleaned.length % 2 !== 0) {
-            throw new Error(`не удалось разобрать hex "${value}": нужна чётная длина`)
+            throw new Error(`could not parse hex "${value}": length must be even`)
         }
         hex = cleaned
     }
     const bytes = hex.match(/../g) ?? []
-    if (bytes.length === 0) throw new Error(`не удалось разобрать hex "${value}"`)
+    if (bytes.length === 0) throw new Error(`could not parse hex "${value}"`)
     return Buffer.from(bytes.map((byte) => parseInt(byte, 16)))
 }
 

@@ -36,6 +36,11 @@ export interface BleLedOptions {
     target?: Partial<Target>
     /** Number of connection attempts. */
     connectTries?: number
+    /**
+     * Session factory. Defaults to node-ble's createBluetooth; tests inject a
+     * fake here to exercise the connection/release logic without hardware.
+     */
+    createBluetooth?: typeof createBluetooth
 }
 
 export interface ScanResult {
@@ -144,6 +149,8 @@ export class BleLed {
     private conns = new Map<string, Connection>()
     /** Per-connection idle-close timers. */
     private idleTimers = new Map<string, NodeJS.Timeout>()
+    /** Whether discovery was started by us and may therefore be stopped by us. */
+    private startedDiscovery = false
     /** Operation queue: guarantees that commands do not interleave. */
     private queue: Promise<unknown> = Promise.resolve()
     private target: Partial<Target>
@@ -168,19 +175,31 @@ export class BleLed {
     private async getAdapter(): Promise<Adapter> {
         if (this.adapter) return this.adapter
         if (!this.bluetooth) {
-            const session = createBluetooth()
+            const session = (this.options.createBluetooth ?? createBluetooth)()
             this.bluetooth = session.bluetooth
             this.destroySession = session.destroy
         }
         this.adapter = await this.bluetooth.defaultAdapter()
-        debug(`адаптер: ${await this.adapter.getAddress()}`)
+        debug(`adapter: ${await this.adapter.getAddress()}`)
         return this.adapter
     }
 
     private async ensureDiscovery(adapter: Adapter): Promise<void> {
         if (!(await adapter.isDiscovering())) {
             await adapter.startDiscovery()
+            this.startedDiscovery = true
         }
+    }
+
+    /**
+     * Stop the scan we started once nobody needs it any more (no live
+     * connections). Otherwise the adapter keeps scanning forever: the radio
+     * stays busy and the adapter cannot be used for anything else.
+     */
+    private async stopDiscoveryWhenIdle(adapter: Adapter): Promise<void> {
+        if (!this.startedDiscovery || this.conns.size > 0) return
+        this.startedDiscovery = false
+        await adapter.stopDiscovery().catch((error: unknown) => debug(`stop discovery: ${errorText(error)}`))
     }
 
     private async safeName(device: Device): Promise<string | undefined> {
@@ -223,9 +242,9 @@ export class BleLed {
             await sleep(1000)
         }
         throw new Error(
-            `устройство «${name}» не найдено за ${Math.round(timeoutMs / 1000)} с. ` +
-                `Проверь: лента включена в розетку и приложение на телефоне закрыто ` +
-                `(пока телефон держит коннект, лента не рекламируется).`,
+            `device "${name}" was not found within ${Math.round(timeoutMs / 1000)} s. ` +
+                `Check that the strip is powered and the phone app is closed ` +
+                `(the strip does not advertise while the phone holds the connection).`,
         )
     }
 
@@ -238,7 +257,7 @@ export class BleLed {
             const found = characteristics.find((characteristic) => characteristic.toLowerCase() === wanted)
             if (found) return service.getCharacteristic(found)
         }
-        throw new Error(`характеристика ${uuid} не найдена в GATT-профиле устройства`)
+        throw new Error(`characteristic ${uuid} is not in the device GATT profile`)
     }
 
     private findConnection(target: Target): Connection | undefined {
@@ -255,21 +274,33 @@ export class BleLed {
             // Already connected by name? Reuse it instead of rediscovering.
             const existing = this.findConnection(target)
             if (existing) return existing
-            address = await this.waitForAddress(adapter, target.name, timeoutMs)
-            debug(`нашли по имени «${target.name}»: ${address}`)
+            address = await this.waitForAddress(adapter, target.name, timeoutMs).catch(async (error: unknown) => {
+                // The scan started for this lookup has no caller any more.
+                await this.stopDiscoveryWhenIdle(adapter)
+                throw error
+            })
+            debug(`found by name "${target.name}": ${address}`)
         }
         const cached = this.conns.get(address)
-        if (cached) return cached
+        if (cached) {
+            // A connection kept in the pool may be a corpse (the strip slept, or
+            // the phone stole it). Reusing it would fail the command and the
+            // corpse would sit in the pool forever, blocking the strip.
+            if (await cached.device.isConnected().catch(() => false)) return cached
+            debug(`connection to ${address} is dead — reconnecting`)
+            await this.closeConnection(address)
+        }
 
         const tries = this.options.connectTries ?? 3
         let lastError: unknown
 
         for (let attempt = 1; attempt <= tries; attempt++) {
+            let device: Device | undefined
             try {
                 // Discovery is always needed: without a fresh entry in the BlueZ
                 // cache, Connect by address fails with "not available".
                 await this.ensureDiscovery(adapter)
-                const device = await adapter.waitDevice(address, Math.min(timeoutMs, 20_000))
+                device = await adapter.waitDevice(address, Math.min(timeoutMs, 20_000))
                 await device.connect()
 
                 const discoveredName = (await this.safeName(device)) ?? target.name
@@ -297,30 +328,49 @@ export class BleLed {
                     try {
                         addDevice(target.device, { address, name: discoveredName })
                     } catch (error) {
-                        debug(`не удалось сохранить адрес в конфиг: ${errorText(error)}`)
+                        debug(`could not save the address to the config: ${errorText(error)}`)
                     }
                 }
 
                 debug(
-                    `подключено: ${discoveredName} [${address}], модель ${protocol.name}, ` +
-                        `settle ${protocol.settleMs} мс${conn.writeWithResponse ? ", write с ответом" : ""}`,
+                    `connected: ${discoveredName} [${address}], model ${protocol.name}, ` +
+                        `settle ${protocol.settleMs} ms${conn.writeWithResponse ? ", write with response" : ""}`,
                 )
                 return conn
             } catch (error) {
                 lastError = error
-                debug(`попытка подключения ${attempt}/${tries}: ${errorText(error)}`)
+                debug(`connect attempt ${attempt}/${tries}: ${errorText(error)}`)
+                // Whatever got connected during this attempt must not be left
+                // hanging: an untracked connection holds the strip (it stops
+                // advertising) and close() would never see it.
+                if (device) await this.disconnectQuietly(device, address)
                 if (attempt < tries) await sleep(attempt * 500)
             }
         }
+        // Nothing was connected: release the scan this attempt started.
+        await this.stopDiscoveryWhenIdle(adapter)
         throw new Error(
-            `не удалось подключиться к ${address}: ${errorText(lastError)}. ` +
-                `Если лента занята телефоном, закрой приложение.`,
+            `could not connect to ${address}: ${errorText(lastError)}. ` +
+                `If the phone holds the strip, close its app.`,
         )
     }
 
     private async write(conn: Connection, packet: Buffer): Promise<void> {
         if (conn.writeWithResponse) await conn.write.writeValueWithResponse(packet)
         else await conn.write.writeValueWithoutResponse(packet)
+    }
+
+    /**
+     * Best-effort teardown of a half-open connection: a device that was
+     * `connect()`-ed but never made it into the pool. Never throws — the caller
+     * is already on an error path.
+     */
+    private async disconnectQuietly(device: Device, address: string): Promise<void> {
+        // If the property cannot be read, assume it is connected: trying to
+        // disconnect an idle device is harmless, leaving it connected is not.
+        const connected = await device.isConnected().catch(() => true)
+        if (!connected) return
+        await device.disconnect().catch((error: unknown) => debug(`connect rollback ${address}: ${errorText(error)}`))
     }
 
     /**
@@ -342,21 +392,33 @@ export class BleLed {
     ): Promise<CommandResult> {
         return this.serialize(async () => {
             const conn = await this.connect(this.resolve(extra))
-            const built = typeof packets === "function" ? packets(conn.protocol) : packets
-            const list = Array.isArray(built) ? built : [built]
-            const sent: string[] = []
-            for (const packet of list) {
-                await this.write(conn, packet)
-                sent.push(formatHex(packet))
-                conn.lastSent = formatHex(packet)
-                debug(`→ ${formatHex(packet)}`)
-                // The pause is always needed, including after the last command in
-                // a series: otherwise the next one (from another call) could land
-                // inside the window.
-                await sleep(conn.protocol.settleMs)
+            try {
+                const built = typeof packets === "function" ? packets(conn.protocol) : packets
+                const list = Array.isArray(built) ? built : [built]
+                const sent: string[] = []
+                for (const packet of list) {
+                    await this.write(conn, packet)
+                    sent.push(formatHex(packet))
+                    conn.lastSent = formatHex(packet)
+                    debug(`→ ${formatHex(packet)}`)
+                    // The pause is always needed, including after the last command in
+                    // a series: otherwise the next one (from another call) could land
+                    // inside the window.
+                    await sleep(conn.protocol.settleMs)
+                }
+                return { address: conn.address, model: conn.protocol.name, sent, settleMs: conn.protocol.settleMs }
+            } catch (error) {
+                // A failed write usually means the link is gone. Keeping such a
+                // connection in the pool would make every next command fail too,
+                // so it is released here and rebuilt on demand.
+                await this.closeConnection(conn.address)
+                throw error
+            } finally {
+                // Release on every path — including a failed write. With warm 0
+                // the strip is freed before this call returns, so the phone or
+                // another agent can take it over immediately.
+                await this.releaseConnection(conn)
             }
-            this.scheduleIdleDisconnect(conn)
-            return { address: conn.address, model: conn.protocol.name, sent, settleMs: conn.protocol.settleMs }
         })
     }
 
@@ -364,31 +426,36 @@ export class BleLed {
     async scan(durationMs = 10_000): Promise<ScanResult[]> {
         return this.serialize(async () => {
             const adapter = await this.getAdapter()
-            const cached = new Set(await adapter.devices())
-            await this.ensureDiscovery(adapter)
-            log(`скан ${Math.round(durationMs / 1000)} с...`)
-            await sleep(durationMs)
-            const target = this.resolve()
-            const results: ScanResult[] = []
-            for (const address of await adapter.devices()) {
-                const device = await adapter.getDevice(address)
-                const name = await this.safeName(device)
-                const guess = classifyDeviceName(name)
-                results.push({
-                    address,
-                    name,
-                    rssi: await this.safeRssi(device),
-                    addressType: await device.getAddressType().catch(() => undefined),
-                    fresh: !cached.has(address),
-                    matchesTarget: this.matchesName(name, target.name),
-                    likely: guess.likely,
-                    confidence: guess.confidence,
-                    model: guess.model,
-                    hint: guess.hint,
-                })
+            try {
+                const cached = new Set(await adapter.devices())
+                await this.ensureDiscovery(adapter)
+                log(`scanning for ${Math.round(durationMs / 1000)} s...`)
+                await sleep(durationMs)
+                const target = this.resolve()
+                const results: ScanResult[] = []
+                for (const address of await adapter.devices()) {
+                    const device = await adapter.getDevice(address)
+                    const name = await this.safeName(device)
+                    const guess = classifyDeviceName(name)
+                    results.push({
+                        address,
+                        name,
+                        rssi: await this.safeRssi(device),
+                        addressType: await device.getAddressType().catch(() => undefined),
+                        fresh: !cached.has(address),
+                        matchesTarget: this.matchesName(name, target.name),
+                        likely: guess.likely,
+                        confidence: guess.confidence,
+                        model: guess.model,
+                        hint: guess.hint,
+                    })
+                }
+                results.sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999))
+                return results
+            } finally {
+                // The scan is over — do not leave the adapter scanning forever.
+                await this.stopDiscoveryWhenIdle(adapter)
             }
-            results.sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999))
-            return results
         })
     }
 
@@ -396,30 +463,33 @@ export class BleLed {
     async info(extra?: Partial<Target>): Promise<DeviceInfo> {
         return this.serialize(async () => {
             const conn = await this.connect(this.resolve(extra))
-            const services: ServiceInfo[] = []
-            for (const serviceUuid of await conn.gatt.services()) {
-                const service = await conn.gatt.getPrimaryService(serviceUuid)
-                const characteristics: CharacteristicInfo[] = []
-                for (const charUuid of await service.characteristics()) {
-                    const characteristic = await service.getCharacteristic(charUuid)
-                    characteristics.push({
-                        uuid: charUuid,
-                        flags: await characteristic.getFlags().catch(() => [] as string[]),
-                    })
+            try {
+                const services: ServiceInfo[] = []
+                for (const serviceUuid of await conn.gatt.services()) {
+                    const service = await conn.gatt.getPrimaryService(serviceUuid)
+                    const characteristics: CharacteristicInfo[] = []
+                    for (const charUuid of await service.characteristics()) {
+                        const characteristic = await service.getCharacteristic(charUuid)
+                        characteristics.push({
+                            uuid: charUuid,
+                            flags: await characteristic.getFlags().catch(() => [] as string[]),
+                        })
+                    }
+                    services.push({ uuid: serviceUuid, characteristics })
                 }
-                services.push({ uuid: serviceUuid, characteristics })
-            }
-            this.scheduleIdleDisconnect(conn)
-            return {
-                address: conn.address,
-                name: conn.deviceName,
-                rssi: await this.safeRssi(conn.device),
-                addressType: await conn.device.getAddressType().catch(() => undefined),
-                model: conn.protocol.name,
-                writeUuid: conn.protocol.writeUuid,
-                notifyUuid: conn.protocol.notifyUuid,
-                settleMs: conn.protocol.settleMs,
-                services,
+                return {
+                    address: conn.address,
+                    name: conn.deviceName,
+                    rssi: await this.safeRssi(conn.device),
+                    addressType: await conn.device.getAddressType().catch(() => undefined),
+                    model: conn.protocol.name,
+                    writeUuid: conn.protocol.writeUuid,
+                    notifyUuid: conn.protocol.notifyUuid,
+                    settleMs: conn.protocol.settleMs,
+                    services,
+                }
+            } finally {
+                await this.releaseConnection(conn)
             }
         })
     }
@@ -437,26 +507,34 @@ export class BleLed {
     ): Promise<{ address: string; model: string; packets: DecodedPacket[]; notifyUuid: string }> {
         return this.serialize(async () => {
             const conn = await this.connect(this.resolve(extra))
-            if (!conn.notify) {
-                throw new Error(`у модели ${conn.protocol.name} нет характеристики уведомлений — watch недоступен`)
-            }
-            const packets: DecodedPacket[] = []
-            const listener = (data: Buffer): void => {
-                const packet = decodePacket(data)
-                packets.push(packet)
-                onPacket?.(packet)
-            }
-            conn.notify.on("valuechanged", listener)
-            await conn.notify.startNotifications()
-            debug(`слушаю ${conn.protocol.notifyUuid} ${Math.round(durationMs / 1000)} с`)
             try {
-                await sleep(durationMs)
+                if (!conn.notify) {
+                    throw new Error(`model ${conn.protocol.name} has no notify characteristic — watch is unavailable`)
+                }
+                const packets: DecodedPacket[] = []
+                const listener = (data: Buffer): void => {
+                    const packet = decodePacket(data)
+                    packets.push(packet)
+                    onPacket?.(packet)
+                }
+                conn.notify.on("valuechanged", listener)
+                try {
+                    await conn.notify.startNotifications()
+                    debug(`listening on ${conn.protocol.notifyUuid} for ${Math.round(durationMs / 1000)} s`)
+                    await sleep(durationMs)
+                } finally {
+                    conn.notify.off("valuechanged", listener)
+                    await conn.notify.stopNotifications().catch(() => undefined)
+                }
+                return {
+                    address: conn.address,
+                    model: conn.protocol.name,
+                    packets,
+                    notifyUuid: conn.protocol.notifyUuid,
+                }
             } finally {
-                conn.notify.off("valuechanged", listener)
-                await conn.notify.stopNotifications().catch(() => undefined)
+                await this.releaseConnection(conn)
             }
-            this.scheduleIdleDisconnect(conn)
-            return { address: conn.address, model: conn.protocol.name, packets, notifyUuid: conn.protocol.notifyUuid }
         })
     }
 
@@ -497,18 +575,24 @@ export class BleLed {
         return list
     }
 
-    /** Close one connection (by address, or by name if no address is known). */
-    async closeTarget(extra?: Partial<Target>): Promise<void> {
-        const conn = this.findConnection(this.resolve(extra))
-        if (conn) await this.closeConnection(conn.address)
-    }
-
-    /** Keep the connection warm: a strip sleeps and reconnecting is not fast. */
-    private scheduleIdleDisconnect(conn: Connection): void {
+    /**
+     * Release the connection once the caller is done with it.
+     *
+     * A strip is single-client: while anything is connected it stops advertising,
+     * so holding it locks the phone out. With warm 0 — the default — the strip is
+     * therefore freed right here, before the operation returns. A positive warm
+     * window only delays the release, which is an explicit opt-in for callers that
+     * prefer reconnect latency over an always-free strip.
+     */
+    private async releaseConnection(conn: Connection): Promise<void> {
         const warmMs = this.options.warmMs ?? 0
         const existing = this.idleTimers.get(conn.address)
         if (existing) clearTimeout(existing)
-        if (warmMs <= 0) return
+        if (!this.conns.has(conn.address)) return
+        if (warmMs <= 0) {
+            await this.closeConnection(conn.address)
+            return
+        }
         const timer = setTimeout(() => {
             void this.closeConnection(conn.address).catch(() => undefined)
         }, warmMs)
@@ -516,6 +600,10 @@ export class BleLed {
         this.idleTimers.set(conn.address, timer)
     }
 
+    /**
+     * Forget one connection: cancel its timer, disconnect the device and let the
+     * adapter finish scanning if nothing else is being held.
+     */
     private async closeConnection(address: string): Promise<void> {
         const timer = this.idleTimers.get(address)
         if (timer) {
@@ -529,6 +617,7 @@ export class BleLed {
                 .disconnect()
                 .catch((error: unknown) => debug(`disconnect ${address}: ${errorText(error)}`))
         }
+        if (this.adapter) await this.stopDiscoveryWhenIdle(this.adapter)
     }
 
     /** Disconnect everything and close the D-Bus session. */
@@ -536,6 +625,10 @@ export class BleLed {
         for (const timer of this.idleTimers.values()) clearTimeout(timer)
         this.idleTimers.clear()
         for (const address of [...this.conns.keys()]) await this.closeConnection(address)
+        if (this.adapter && this.startedDiscovery) {
+            await this.adapter.stopDiscovery().catch((error: unknown) => debug(`stop discovery: ${errorText(error)}`))
+            this.startedDiscovery = false
+        }
         if (this.destroySession) {
             try {
                 this.destroySession()

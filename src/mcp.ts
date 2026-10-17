@@ -10,8 +10,13 @@
  * stderr (see log.ts) and console.log is forcibly redirected to stderr.
  *
  * Multi-strip: every control tool takes an optional `device` argument — the
- * alias of a named device from ble_devices (e.g. "спальня"). Without it, the
+ * alias of a named device from ble_devices (e.g. "bedroom"). Without it, the
  * default device is used.
+ *
+ * Commands go through ONE aggregate tool (ble_apply) rather than one tool per
+ * command: a batch needs one connection, and the connection is released as soon
+ * as the call returns (a strip is single-client, so holding it locks the phone
+ * out).
  */
 
 import { randomUUID } from "node:crypto"
@@ -22,10 +27,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import { z } from "zod"
 
-import { BleLed } from "./ble.js"
+import { BleLed, type CommandResult } from "./ble.js"
 import { addDevice, configPath, defaultDevice, listDevices, removeDevice, type Target } from "./config.js"
 import { debug, log, protectStdout } from "./log.js"
-import { listModels, parseColor, parseHexPacket, settleMsFor } from "./protocol.js"
+import { listModels, parseColor, parseHexPacket, settleMsFor, type Protocol } from "./protocol.js"
 
 const VERSION = "0.1.0"
 
@@ -44,10 +49,14 @@ function ok(payload: Record<string, unknown>, summary: string): ToolResponse {
     }
 }
 
+function errorText(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+}
+
 function fail(error: unknown): ToolResponse {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = errorText(error)
     return {
-        content: [{ type: "text", text: `Ошибка: ${message}` }],
+        content: [{ type: "text", text: `Error: ${message}` }],
         structuredContent: { error: message },
         isError: true,
     }
@@ -68,7 +77,7 @@ function guard<Args>(handler: (args: Args) => Promise<ToolResponse>): (args: Arg
 const deviceParam = z
     .string()
     .optional()
-    .describe("Имя ленты из ble_devices (например 'спальня'). Без него — устройство по умолчанию.")
+    .describe("Name of a strip from ble_devices (e.g. 'bedroom'). Without it the default device is used.")
 
 /** Build a per-call target override, or undefined so the base target applies. */
 function targetOf(device?: string): Partial<Target> | undefined {
@@ -76,40 +85,101 @@ function targetOf(device?: string): Partial<Target> | undefined {
 }
 
 /**
+ * One ordered action in a ble_apply batch. Every variant maps to exactly one
+ * packet, so the order of the array is the order on the wire.
+ */
+const actionSchema = z.discriminatedUnion("type", [
+    z.object({
+        type: z.literal("power"),
+        state: z.enum(["on", "off"]).describe("on — power on, off — power off"),
+    }),
+    z.object({ type: z.literal("color"), color: z.string().describe("#rrggbb, rrggbb or r,g,b") }),
+    z.object({
+        type: z.literal("brightness"),
+        percent: z.number().min(0).max(100).describe("Brightness 0-100"),
+    }),
+    z.object({
+        type: z.literal("white"),
+        percent: z.number().min(0).max(100).describe("White brightness 0-100"),
+    }),
+    z.object({
+        type: z.literal("color_temperature"),
+        kelvin: z.number().min(1000).max(10000).describe("Temperature in kelvin"),
+    }),
+    z.object({ type: z.literal("effect"), index: z.number().min(0).describe("Effect number") }),
+    z.object({ type: z.literal("speed"), value: z.number().min(0).describe("Effect speed (usually 0-255)") }),
+    z.object({
+        type: z.literal("raw"),
+        hex: z.string().describe("Raw packet bytes in hex; spaces and 0x are allowed"),
+    }),
+])
+
+type Action = z.infer<typeof actionSchema>
+
+/**
+ * One action → one packet. Values are parsed/built here, inside the connected
+ * callback, so a bad value (or a command the model does not implement) fails
+ * only its own action instead of the whole batch.
+ */
+function buildAction(protocol: Protocol, action: Action): Buffer {
+    switch (action.type) {
+        case "power":
+            return action.state === "on" ? protocol.turnOn() : protocol.turnOff()
+        case "color":
+            return protocol.color(parseColor(action.color))
+        case "brightness":
+            return protocol.brightness(action.percent)
+        case "white":
+            return protocol.white(action.percent)
+        case "color_temperature":
+            return protocol.colorTemp(action.kelvin)
+        case "effect":
+            return protocol.effect(action.index)
+        case "speed":
+            return protocol.speed(action.value)
+        case "raw":
+            return parseHexPacket(action.hex)
+    }
+}
+
+/**
  * Register all tools.
  *
- * The tools are deliberately "flat" and explicit: it is easier for an agent to
- * pick ble_set_color than to assemble an action string. Commands that must go
- * together (an effect plus its speed, for example) are combined into a single
- * call — otherwise the settle delay between them could be violated under
- * parallel calls.
+ * Writing to a strip goes through a single aggregate tool, ble_apply: it takes an
+ * ordered array of actions and runs them over ONE connection. That is what makes
+ * "release the channel right after the call" cheap — a batch of commands costs a
+ * single connect, not one per command — and it keeps the mandatory settle delay
+ * intact, because the order of the array is the order on the wire.
+ *
+ * Read-only and config tools (status, scan, info, watch, devices, models) stay
+ * separate: they never write to the write characteristic.
  */
 export function registerTools(server: McpServer, led: BleLed): void {
     server.registerTool(
         "ble_status",
         {
-            title: "Состояние BLE-ленты",
+            title: "LED strip status",
             description:
-                "Показать конфигурацию (адрес, имя, модель) и наличие живого BLE-соединения. Не подключается к устройству.",
+                "Show the configuration (address, name, model) and whether a live BLE connection exists. Does not connect to the device.",
             inputSchema: { device: deviceParam },
         },
         guard(async ({ device }) => {
             const status = await led.status(targetOf(device))
-            return ok(status as unknown as Record<string, unknown>, "Состояние конфигурации:")
+            return ok(status as unknown as Record<string, unknown>, "Configuration status:")
         }),
     )
 
     server.registerTool(
         "ble_scan",
         {
-            title: "Сканировать BLE-эфир",
+            title: "Scan the BLE air",
             description:
-                "Найти BLE-устройства рядом. Запускай, если лента недоступна или нужно узнать/подтвердить MAC-адрес. " +
-                "Каждое устройство помечено подсказкой, похоже ли оно на LED-ленту (имена НЕ обязаны начинаться с BLE). " +
-                "Лента рекламируется только когда с ней не соединён телефон — закрой приложение. " +
-                "Устройства с пометкой fresh найдены именно сейчас, остальные — из кэша BlueZ.",
+                "Find BLE devices nearby. Run it when the strip is unreachable or when the MAC address needs to be known or confirmed. " +
+                "Every device carries a hint whether it looks like an LED strip (names do NOT have to start with BLE). " +
+                "A strip advertises only while the phone is not connected to it — close the app. " +
+                "Devices marked fresh were seen just now; the rest come from the BlueZ cache.",
             inputSchema: {
-                durationSeconds: z.number().min(1).max(60).optional().describe("Длительность скана в секундах"),
+                durationSeconds: z.number().min(1).max(60).optional().describe("Scan duration in seconds"),
             },
         },
         guard(async ({ durationSeconds }) => {
@@ -126,181 +196,122 @@ export function registerTools(server: McpServer, led: BleLed): void {
                     hint: device.hint,
                 }))
             const summary = likely.length
-                ? `Похоже на LED-ленты: ${likely.length}.`
-                : "Явных LED-лент по именам не видно (проверь, что приложение на телефоне закрыто)."
-            return ok({ found: devices.length, target, likely, devices }, `Результат сканирования. ${summary}`)
+                ? `Looks like an LED strip: ${likely.length}.`
+                : "No obvious LED strips by name (check that the phone app is closed)."
+            return ok({ found: devices.length, target, likely, devices }, `Scan result. ${summary}`)
         }),
     )
 
     server.registerTool(
         "ble_info",
         {
-            title: "GATT-профиль ленты",
+            title: "Strip GATT profile",
             description:
-                "Подключиться и показать сервисы и характеристики устройства, а также определённую модель протокола и settle-паузу.",
+                "Connect and show the device services and characteristics, plus the detected protocol model and settle delay.",
             inputSchema: { device: deviceParam },
         },
         guard(async ({ device }) => {
             const info = await led.info(targetOf(device))
-            return ok(info as unknown as Record<string, unknown>, "Профиль устройства:")
+            return ok(info as unknown as Record<string, unknown>, "Device profile:")
         }),
     )
 
     server.registerTool(
-        "ble_power",
+        "ble_apply",
         {
-            title: "Включить/выключить ленту",
-            description: "Подать питание на ленту или погасить её.",
-            inputSchema: {
-                state: z.enum(["on", "off"]).describe("on — включить, off — выключить"),
-                device: deviceParam,
-            },
-        },
-        guard(async ({ state, device }) => {
-            const result = await led.run((protocol) => (state === "on" ? protocol.turnOn() : protocol.turnOff()), {
-                device,
-            })
-            return ok({ ...result, state }, state === "on" ? "Лента включена." : "Лента выключена.")
-        }),
-    )
-
-    server.registerTool(
-        "ble_set_color",
-        {
-            title: "Задать цвет",
-            description: "Установить цвет ленты. Форматы: '#ff8800', 'ff8800', '255,136,0'.",
-            inputSchema: { color: z.string().describe("#rrggbb, rrggbb или r,g,b"), device: deviceParam },
-        },
-        guard(async ({ color, device }) => {
-            const rgb = parseColor(color)
-            const result = await led.run((protocol) => protocol.color(rgb), targetOf(device))
-            return ok({ ...result, color: rgb }, `Цвет установлен: ${color}.`)
-        }),
-    )
-
-    server.registerTool(
-        "ble_set_brightness",
-        {
-            title: "Яркость",
-            description: "Установить яркость в процентах (0-100).",
-            inputSchema: { percent: z.number().min(0).max(100).describe("Яркость 0-100"), device: deviceParam },
-        },
-        guard(async ({ percent, device }) => {
-            const result = await led.run((protocol) => protocol.brightness(percent), targetOf(device))
-            return ok({ ...result, percent }, `Яркость: ${percent}%.`)
-        }),
-    )
-
-    server.registerTool(
-        "ble_set_white",
-        {
-            title: "Белый свет",
-            description: "Включить белый свет с заданной яркостью (0-100%).",
-            inputSchema: { percent: z.number().min(0).max(100).describe("Яркость белого 0-100"), device: deviceParam },
-        },
-        guard(async ({ percent, device }) => {
-            const result = await led.run((protocol) => protocol.white(percent), targetOf(device))
-            return ok({ ...result, percent }, `Белый свет: ${percent}%.`)
-        }),
-    )
-
-    server.registerTool(
-        "ble_set_color_temperature",
-        {
-            title: "Цветовая температура",
-            description: "Тёплый/холодный белый. Обычный диапазон 1800 K (тёплый) … 7000 K (холодный).",
-            inputSchema: {
-                kelvin: z.number().min(1000).max(10000).describe("Температура в кельвинах"),
-                device: deviceParam,
-            },
-        },
-        guard(async ({ kelvin, device }) => {
-            const result = await led.run((protocol) => protocol.colorTemp(kelvin), targetOf(device))
-            return ok({ ...result, kelvin }, `Температура: ${kelvin} K.`)
-        }),
-    )
-
-    server.registerTool(
-        "ble_set_effect",
-        {
-            title: "Эффект",
+            title: "Apply a batch of commands",
             description:
-                "Включить эффект по номеру. 0-127 — обычные эффекты, 128-135 — режимы с микрофоном " +
-                "(у некоторых моделей нумерация отличается). Скорость и яркость можно задать сразу, " +
-                "тогда они уйдут в одном вызове с соблюдением паузы.",
+                "Send one or more strip commands in a SINGLE call, in the given order, over one BLE connection " +
+                "(the mandatory settle pause is honoured after every packet). Put every command of one intent into " +
+                "the same array — for example 'brightness 100% and red' is " +
+                '[{"type":"brightness","percent":100},{"type":"color","color":"#ff0000"}] — rather than calling ' +
+                "several tools: the connection is released the moment this call returns, so a separate call would " +
+                "pay for a full reconnect. Order matters: for conflicting modes the last command wins, and a speed or " +
+                "brightness that belongs to an effect must come before the effect itself. An action the detected " +
+                "model does not support is skipped and reported, the rest are still sent.",
             inputSchema: {
-                index: z.number().min(0).describe("Номер эффекта"),
-                speed: z.number().min(0).optional().describe("Скорость эффекта (обычно 0-255)"),
-                brightness: z.number().min(0).max(100).optional().describe("Яркость 0-100"),
+                actions: z.array(actionSchema).min(1).describe("Ordered commands to run over one connection"),
                 device: deviceParam,
             },
         },
-        guard(async ({ index, speed, brightness, device }) => {
-            const result = await led.run((protocol) => {
-                const packets: Buffer[] = []
-                if (speed !== undefined) packets.push(protocol.speed(speed))
-                if (brightness !== undefined) packets.push(protocol.brightness(brightness))
-                packets.push(protocol.effect(index))
-                return packets
-            }, targetOf(device))
-            return ok({ ...result, index }, `Эффект ${index} включён.`)
-        }),
-    )
+        guard(async ({ actions, device }) => {
+            const planned: { index: number; action: Action }[] = []
+            const skipped: { index: number; action: Action; error: string }[] = []
+            let model: string | undefined
+            let result: CommandResult
 
-    server.registerTool(
-        "ble_set_speed",
-        {
-            title: "Скорость эффекта",
-            description: "Изменить скорость текущего эффекта (обычно 0-255).",
-            inputSchema: { value: z.number().min(0).describe("Скорость"), device: deviceParam },
-        },
-        guard(async ({ value, device }) => {
-            const result = await led.run((protocol) => protocol.speed(value), targetOf(device))
-            return ok({ ...result, value }, `Скорость: ${value}.`)
-        }),
-    )
+            try {
+                result = await led.run((protocol) => {
+                    model = protocol.name
+                    const packets: Buffer[] = []
+                    actions.forEach((action, index) => {
+                        try {
+                            packets.push(buildAction(protocol, action))
+                            planned.push({ index, action })
+                        } catch (error) {
+                            skipped.push({ index, action, error: errorText(error) })
+                        }
+                    })
+                    return packets
+                }, targetOf(device))
+            } catch (error) {
+                // Only a connection/transport failure reaches here: unsupported
+                // actions are captured per action above.
+                const message = errorText(error)
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Error: ${message}\n\nThe channel was released before this response.`,
+                        },
+                    ],
+                    structuredContent: { error: message, model: model ?? null, skipped, released: true },
+                    isError: true,
+                }
+            }
 
-    server.registerTool(
-        "ble_send_raw",
-        {
-            title: "Произвольный пакет",
-            description:
-                "Отправить в характеристику записи произвольный пакет в hex (например '7e 04 04 f0 00 01 ff 00 ef'). " +
-                "Нужно для отладки и для команд, которых нет среди готовых инструментов.",
-            inputSchema: { packet: z.string().describe("Байты в hex, пробелы и 0x допустимы"), device: deviceParam },
-        },
-        guard(async ({ packet, device }) => {
-            const bytes = parseHexPacket(packet)
-            const result = await led.run(() => bytes, targetOf(device))
-            return ok({ ...result, requested: packet }, "Пакет отправлен.")
+            // `sent` is in the same order as the packets that were built.
+            const applied = planned.map((item, position) => ({ ...item, packet: result.sent[position] ?? null }))
+            const payload = {
+                model: result.model,
+                settleMs: result.settleMs,
+                requested: actions.length,
+                applied,
+                skipped,
+                released: true,
+            }
+            const summary = skipped.length
+                ? `Applied ${applied.length} of ${actions.length} commands; ${skipped.length} skipped.`
+                : `Applied ${applied.length} commands.`
+            return ok(payload, summary)
         }),
     )
 
     server.registerTool(
         "ble_watch",
         {
-            title: "Слушать notify-канал",
+            title: "Listen to the notify channel",
             description:
-                "Слушать уведомления ленты заданное время. Контроллер write-only: он возвращает ЭХО наших команд, " +
-                "а не реальное состояние, поэтому инструмент полезен для снятия протокола приложения и отладки.",
+                "Listen to strip notifications for a given time. The controller is write-only: it echoes our commands back " +
+                "instead of reporting real state, which makes this tool useful for capturing the app protocol and debugging.",
             inputSchema: {
-                durationSeconds: z.number().min(1).max(120).optional().describe("Сколько слушать, секунды"),
+                durationSeconds: z.number().min(1).max(120).optional().describe("How long to listen, seconds"),
                 device: deviceParam,
             },
         },
         guard(async ({ durationSeconds, device }) => {
             const result = await led.watch((durationSeconds ?? 10) * 1000, undefined, targetOf(device))
-            return ok(result as unknown as Record<string, unknown>, `Собрано пакетов: ${result.packets.length}.`)
+            return ok(result as unknown as Record<string, unknown>, `Packets collected: ${result.packets.length}.`)
         }),
     )
 
     server.registerTool(
         "ble_devices",
         {
-            title: "Список сохранённых лент",
+            title: "List saved strips",
             description:
-                "Показать все привязанные ленты (алиас → адрес/имя/модель), какая из них по умолчанию и какие сейчас подключены. " +
-                "Сначала найди адреса через ble_scan, затем привяжи их через ble_add_device.",
+                "Show every saved strip (alias → address/name/model), which one is the default and which are connected right now. " +
+                "Find the addresses with ble_scan first, then attach them with ble_add_device.",
             inputSchema: {},
         },
         guard(async () => {
@@ -323,8 +334,8 @@ export function registerTools(server: McpServer, led: BleLed): void {
             return ok(
                 { default: def, count: view.length, devices: view },
                 view.length
-                    ? `Сохранено лент: ${view.length}.`
-                    : "Сохранённых лент нет — найди устройства (ble_scan) и привяжи их (ble_add_device).",
+                    ? `Saved strips: ${view.length}.`
+                    : "No saved strips — find devices (ble_scan) and attach them (ble_add_device).",
             )
         }),
     )
@@ -332,23 +343,23 @@ export function registerTools(server: McpServer, led: BleLed): void {
     server.registerTool(
         "ble_add_device",
         {
-            title: "Привязать ленту под именем",
+            title: "Attach a strip under a name",
             description:
-                "Сохранить устройство под понятным именем (алиасом), например 'спальня' или 'гостиная'. " +
-                "Возьми address из ble_scan. После этого управляй лентой через параметр device в других инструментах. " +
-                "Модель указывай только если автоопределение ошибается. setDefault=true сделает ленту основной.",
+                "Save a device under a readable name (alias), for example 'bedroom' or 'living-room'. " +
+                "Take address from ble_scan. After that control the strip with the device argument in the other tools. " +
+                "Set model only when auto-detection gets it wrong. setDefault=true makes this strip the default one.",
             inputSchema: {
-                device: z.string().describe("Имя (алиас), например 'спальня'"),
-                address: z.string().optional().describe("MAC-адрес из ble_scan, например AA:BB:CC:DD:EE:FF"),
-                name: z.string().optional().describe("Имя устройства в эфире (если адрес пока неизвестен)"),
-                model: z.string().optional().describe("Модель из ble_list_models"),
-                setDefault: z.boolean().optional().describe("Сделать устройством по умолчанию"),
+                device: z.string().describe("Name (alias), e.g. 'bedroom'"),
+                address: z.string().optional().describe("MAC address from ble_scan, e.g. AA:BB:CC:DD:EE:FF"),
+                name: z.string().optional().describe("Advertising device name (if the address is not known yet)"),
+                model: z.string().optional().describe("Model from ble_list_models"),
+                setDefault: z.boolean().optional().describe("Make it the default device"),
             },
         },
         guard(async ({ device, address, name, model, setDefault }) => {
             const isNew = !(device in listDevices())
             if (isNew && !address && !name) {
-                throw new Error("укажи address (из ble_scan) или name устройства")
+                throw new Error("provide address (from ble_scan) or the device name")
             }
             const config = addDevice(device, { address, name, model }, { makeDefault: setDefault })
             return ok(
@@ -358,7 +369,7 @@ export function registerTools(server: McpServer, led: BleLed): void {
                     entry: config.devices?.[device] ?? null,
                     default: config.default ?? null,
                 },
-                `Лента «${device}» привязана. Управляй ей через параметр device.`,
+                `Strip "${device}" attached. Control it with the device argument.`,
             )
         }),
     )
@@ -366,16 +377,16 @@ export function registerTools(server: McpServer, led: BleLed): void {
     server.registerTool(
         "ble_remove_device",
         {
-            title: "Отвязать ленту",
-            description: "Удалить сохранённую ленту по имени (алиасу).",
-            inputSchema: { device: z.string().describe("Имя (алиас) для удаления") },
+            title: "Detach a strip",
+            description: "Remove a saved strip by name (alias).",
+            inputSchema: { device: z.string().describe("Name (alias) to remove") },
         },
         guard(async ({ device }) => {
             const removed = listDevices()[device] ?? null
             const config = removeDevice(device)
             return ok(
                 { path: configPath(), device, removed, default: config.default ?? null },
-                `Лента «${device}» отвязана.`,
+                `Strip "${device}" detached.`,
             )
         }),
     )
@@ -383,10 +394,10 @@ export function registerTools(server: McpServer, led: BleLed): void {
     server.registerTool(
         "ble_list_models",
         {
-            title: "Поддерживаемые модели",
+            title: "Supported models",
             description:
-                "Список известных моделей контроллеров с их UUID и набором поддерживаемых команд. " +
-                "Данные из интеграции Home Assistant elkbledom.",
+                "Known controller models with their UUIDs and the set of supported commands. " +
+                "Taken from the Home Assistant elkbledom integration.",
             inputSchema: {},
         },
         guard(async () => {
@@ -397,11 +408,11 @@ export function registerTools(server: McpServer, led: BleLed): void {
                 settleMs: settleMsFor(model.name),
                 commands: Object.keys(model.commands),
             }))
-            return ok({ count: models.length, models }, `Моделей в реестре: ${models.length}.`)
+            return ok({ count: models.length, models }, `Models in the registry: ${models.length}.`)
         }),
     )
 
-    debug(`инструменты зарегистрированы, версия ${VERSION}`)
+    debug(`tools registered, version ${VERSION}`)
 }
 
 /** A fresh server instance per HTTP session. */
@@ -417,7 +428,7 @@ export async function startStdioServer(led: BleLed): Promise<void> {
     const server = createMcpServer(led)
     const transport = new StdioServerTransport()
     await server.connect(transport)
-    debug("MCP-сервер запущен по stdio")
+    debug("MCP server started over stdio")
 
     const shutdown = async (): Promise<void> => {
         await server.close().catch(() => undefined)
@@ -478,7 +489,7 @@ export async function startHttpServer(led: BleLed, options: HttpServerOptions): 
                 return
             }
             if (url.pathname !== options.path) {
-                sendJson(res, 404, { error: "not found", hint: `MCP-эндпоинт: ${options.path}` })
+                sendJson(res, 404, { error: "not found", hint: `MCP endpoint: ${options.path}` })
                 return
             }
 
@@ -494,7 +505,10 @@ export async function startHttpServer(led: BleLed, options: HttpServerOptions): 
                 if (req.method !== "POST") {
                     sendJson(res, 400, {
                         jsonrpc: "2.0",
-                        error: { code: -32000, message: "Требуется POST с initialize или заголовок Mcp-Session-Id" },
+                        error: {
+                            code: -32000,
+                            message: "A POST with initialize or an Mcp-Session-Id header is required",
+                        },
                         id: null,
                     })
                     return
@@ -506,13 +520,13 @@ export async function startHttpServer(led: BleLed, options: HttpServerOptions): 
                     enableJsonResponse: options.stateless === true,
                     onsessioninitialized: (id) => {
                         transports.set(id, transport)
-                        debug(`HTTP-сессия открыта: ${id}`)
+                        debug(`HTTP session opened: ${id}`)
                     },
                 })
                 transport.onclose = () => {
                     if (transport.sessionId) {
                         transports.delete(transport.sessionId)
-                        debug(`HTTP-сессия закрыта: ${transport.sessionId}`)
+                        debug(`HTTP session closed: ${transport.sessionId}`)
                     }
                 }
 

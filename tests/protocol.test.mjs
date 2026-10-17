@@ -24,13 +24,13 @@ import {
 
 const hex = (buffer) => Array.from(buffer, (b) => b.toString(16).padStart(2, "0")).join(" ")
 
-test("реестр моделей загружается", () => {
+test("the model registry loads", () => {
     const models = listModels()
-    assert.ok(models.length > 10, `ожидалось много моделей, получено ${models.length}`)
+    assert.ok(models.length > 10, `expected many models, got ${models.length}`)
     assert.ok(models.some((model) => model.name === "ELK-BLEDDM"))
 })
 
-test("модель определяется по имени устройства", () => {
+test("the model is detected from the device name", () => {
     assert.equal(findModel("ELK-BLEDDM")?.name, "ELK-BLEDDM")
     assert.equal(findModel("elk-bleddm")?.name, "ELK-BLEDDM")
     // Prefix: real names often carry suffixes like ELK-BLEDOM0E.
@@ -40,14 +40,14 @@ test("модель определяется по имени устройства
     assert.equal(findModel(undefined), undefined)
 })
 
-test("Protocol.forDevice: переопределение и дефолт", () => {
+test("Protocol.forDevice: override and default", () => {
     assert.equal(Protocol.forDevice("ELK-BLEDDM").name, "ELK-BLEDDM")
-    assert.equal(Protocol.forDevice("неизвестное").name, "ELK-BLEDDM")
+    assert.equal(Protocol.forDevice("unknown-device").name, "ELK-BLEDDM")
     assert.equal(Protocol.forDevice("ELK-BLEDDM", "ELK-BTC").name, "ELK-BTC")
-    assert.throws(() => Protocol.forDevice("ELK-BLEDDM", "нет-такой-модели"), /не найдена в реестре/)
+    assert.throws(() => Protocol.forDevice("ELK-BLEDDM", "no-such-model"), /is not in the registry/)
 })
 
-test("пакеты ELK-BLEDDM совпадают с эталоном с железа", () => {
+test("ELK-BLEDDM packets match the hardware reference", () => {
     const protocol = Protocol.forDevice("ELK-BLEDDM")
     assert.equal(hex(protocol.turnOn()), "7e 04 04 f0 00 01 ff 00 ef")
     assert.equal(hex(protocol.turnOff()), "7e 04 04 00 00 00 ff 00 ef")
@@ -57,7 +57,7 @@ test("пакеты ELK-BLEDDM совпадают с эталоном с желе
     assert.equal(protocol.settleMs, 300)
 })
 
-test("pack подставляет заполнители и конвертирует интенсивность", () => {
+test("pack fills the placeholders and converts intensity", () => {
     // 'i' in models.json is on the 0-255 scale, while the controller expects percents 0-100.
     assert.equal(hex(pack([0x7e, 0x04, 0x01, "i", 0xff, 0, 0xff, 0, 0xef], { i: 255 })), "7e 04 01 64 ff 00 ff 00 ef")
     assert.equal(hex(pack([0x7e, 0x04, 0x01, "i", 0xff, 0, 0xff, 0, 0xef], { i: 0 })), "7e 04 01 00 ff 00 ff 00 ef")
@@ -65,7 +65,7 @@ test("pack подставляет заполнители и конвертиру
     assert.equal(hex(pack(["v"], { v: 999 })), "ff")
     assert.equal(hex(pack(["v"], { v: -5 })), "00")
     // A missing placeholder is an explicit error, not a zero byte.
-    assert.throws(() => pack(["r"], {}), /не задан заполнитель/)
+    assert.throws(() => pack(["r"], {}), /has no placeholder/)
 })
 
 test("percent → intensity", () => {
@@ -76,7 +76,7 @@ test("percent → intensity", () => {
     assert.equal(pctToIntensity(-10), 0)
 })
 
-test("цветовая температура: края упираются в границы модели", () => {
+test("color temperature: the edges clamp to the model range", () => {
     const protocol = Protocol.forDevice("ELK-BLEDDM")
     // 1800 K is fully warm (w=100, c=0), 7000 K is fully cool.
     assert.deepEqual(Array.from(protocol.colorTemp(1800)), [0x7e, 0x00, 0x05, 0x02, 100, 0, 0, 0, 0xef])
@@ -85,26 +85,26 @@ test("цветовая температура: края упираются в г
     assert.equal(protocol.colorTemp(99999)[4], 0)
 })
 
-test("parseColor понимает все три формата", () => {
+test("parseColor understands all three formats", () => {
     assert.deepEqual(parseColor("#ff8800"), { r: 255, g: 136, b: 0 })
     assert.deepEqual(parseColor("ff8800"), { r: 255, g: 136, b: 0 })
     assert.deepEqual(parseColor("f80"), { r: 255, g: 136, b: 0 })
     assert.deepEqual(parseColor("255,136,0"), { r: 255, g: 136, b: 0 })
     assert.deepEqual(parseColor("255 136 0"), { r: 255, g: 136, b: 0 })
-    assert.throws(() => parseColor("#xyz"), /не удалось разобрать цвет/)
-    assert.throws(() => parseColor("300,0,0"), /не удалось разобрать цвет/)
+    assert.throws(() => parseColor("#xyz"), /could not parse color/)
+    assert.throws(() => parseColor("300,0,0"), /could not parse color/)
 })
 
-test("parseHexPacket принимает пробелы, запятые и 0x", () => {
+test("parseHexPacket accepts spaces, commas and 0x", () => {
     assert.equal(hex(parseHexPacket("7e 04 04 f0 00 01 ff 00 ef")), "7e 04 04 f0 00 01 ff 00 ef")
     assert.equal(hex(parseHexPacket("7e0404f000 01ff00ef")), "7e 04 04 f0 00 01 ff 00 ef")
     assert.equal(hex(parseHexPacket("0x7e, 0x04, 0xef")), "7e 04 ef")
     assert.equal(hex(parseHexPacket("7E0404F00001FF00EF")), "7e 04 04 f0 00 01 ff 00 ef")
-    assert.throws(() => parseHexPacket("7e0"), /не удалось разобрать hex/)
-    assert.throws(() => parseHexPacket("zz"), /не удалось разобрать hex/)
+    assert.throws(() => parseHexPacket("7e0"), /could not parse hex/)
+    assert.throws(() => parseHexPacket("zz"), /could not parse hex/)
 })
 
-test("formatHex и разбор уведомлений", () => {
+test("formatHex and notification decoding", () => {
     assert.equal(formatHex(Uint8Array.from([0x7e, 0x00, 0xef])), "7e 00 ef")
 
     // An echo of our own command — the most common case for BLEDDM.
@@ -129,8 +129,8 @@ test("formatHex и разбор уведомлений", () => {
     assert.equal(state.state?.brightnessPct, 100)
 })
 
-test("модель без нужной команды даёт понятную ошибку", () => {
+test("a model without the command gives a clear error", () => {
     // ELK-BTCW only supports on/off/brightness — it has no effects.
     const protocol = Protocol.forDevice("ELK-BTCW")
-    assert.throws(() => protocol.effect(1), /не поддерживает команду|не задан заполнитель/)
+    assert.throws(() => protocol.effect(1), /does not support the command|has no placeholder/)
 })

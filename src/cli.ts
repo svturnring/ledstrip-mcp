@@ -31,14 +31,14 @@ const VERSION = "0.1.0"
 
 function toMilliseconds(value: string, flag: string): number {
     const seconds = Number(value)
-    if (!Number.isFinite(seconds) || seconds < 0) throw new Error(`${flag}: ожидается неотрицательное число секунд`)
+    if (!Number.isFinite(seconds) || seconds < 0) throw new Error(`${flag}: expected a non-negative number of seconds`)
     return Math.round(seconds * 1000)
 }
 
 function toPercent(value: string, flag: string): number {
     const percent = Number(value)
     if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
-        throw new Error(`${flag}: ожидается 0-100`)
+        throw new Error(`${flag}: expected 0-100`)
     }
     return Math.round(percent)
 }
@@ -76,16 +76,16 @@ export function createProgram(): Command {
 
     program
         .name("ble-mcp")
-        .description("Управление BLE-лентами ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK")
+        .description("Control BLE LED strips ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK")
         .version(VERSION)
-        .option("-a, --address <mac>", "MAC-адрес ленты (иначе ищем по имени)")
-        .option("-n, --name <name>", "имя устройства в эфире")
-        .option("-m, --model <model>", "принудительная модель из реестра (см. models)")
-        .option("-D, --device <alias>", "сохранённая лента по имени из config (см. devices)")
-        .option("--timeout <ms>", "сколько ждать появления устройства, мс", "30000")
-        .option("--warm <ms>", "держать соединение тёплым после команды, мс", "0")
-        .option("--json", "машиночитаемый вывод")
-        .option("-v, --verbose", "подробный лог в stderr")
+        .option("-a, --address <mac>", "MAC address of the strip (otherwise search by name)")
+        .option("-n, --name <name>", "advertised device name")
+        .option("-m, --model <model>", "forced model from the registry (see models)")
+        .option("-D, --device <alias>", "saved strip by alias from the config (see devices)")
+        .option("--timeout <ms>", "how long to wait for the device to appear, ms", "30000")
+        .option("--warm <ms>", "keep the connection warm after a command, ms (0 = release immediately)", "0")
+        .option("--json", "machine-readable output")
+        .option("-v, --verbose", "verbose log to stderr")
 
     const globals = (): GlobalOptions => {
         const opts = program.opts<GlobalOptions & { timeout: string; warm: string }>()
@@ -103,31 +103,31 @@ export function createProgram(): Command {
 
     program
         .command("scan")
-        .description("просканировать эфир и показать BLE-устройства рядом")
-        .option("-d, --duration <seconds>", "длительность скана", "10")
+        .description("scan the air and show nearby BLE devices")
+        .option("-d, --duration <seconds>", "scan duration", "10")
         .action(async (cmd: { duration: string }) => {
             const opts = globals()
             const durationMs = toMilliseconds(cmd.duration, "--duration")
             const results = await withLed(opts, (led) => led.scan(durationMs))
             const target = results.filter((item) => item.matchesTarget)
             print(opts, { found: results.length, target: target[0] ?? null, devices: results }, (data) => {
-                const lines = [`Найдено устройств: ${data.devices.length}`]
+                const lines = [`Devices found: ${data.devices.length}`]
                 if (data.devices.length === 0) {
-                    lines.push("Ничего не видно. Проверь, что лента включена в розетку и приложение закрыто.")
+                    lines.push("Nothing visible. Check that the strip is powered and the phone app is closed.")
                 }
                 for (const device of data.devices) {
                     const marks = [
-                        device.matchesTarget ? "← цель" : "",
-                        device.likely ? "похоже на LED" : "",
-                        device.fresh ? "новое" : "из кэша",
+                        device.matchesTarget ? "<- target" : "",
+                        device.likely ? "looks like LED" : "",
+                        device.fresh ? "fresh" : "from cache",
                         device.addressType ?? "",
                     ].filter(Boolean)
                     lines.push(
-                        `  ${signalText(device.rssi)}  ${device.address}  ${(device.name ?? "(без имени)").padEnd(24)} ${marks.join(", ")}  — ${device.hint}`,
+                        `  ${signalText(device.rssi)}  ${device.address}  ${(device.name ?? "(no name)").padEnd(24)} ${marks.join(", ")}  — ${device.hint}`,
                     )
                 }
                 if (target.length === 0) {
-                    lines.push("Цель по имени не найдена — возможно, телефон всё ещё держит соединение.")
+                    lines.push("Target not found by name — the phone may still hold the connection.")
                 }
                 return lines.join("\n")
             })
@@ -135,37 +135,37 @@ export function createProgram(): Command {
 
     program
         .command("status")
-        .description("показать конфиг и текущее состояние соединения")
+        .description("show the config and the current connection state")
         .action(async () => {
             const opts = globals()
             const info = await withLed(opts, (led) => led.status())
             print(opts, info, (data) =>
                 [
-                    `Конфиг:     ${data.configPath}`,
-                    `Адрес:      ${data.address ?? "(не задан — ищем по имени)"}`,
-                    `Имя:        ${data.name}`,
-                    `Модель:     ${data.model ?? "(автоопределение)"}`,
-                    `Соединение: ${data.connected ? `активно с ${data.deviceName ?? "?"}` : "нет"}`,
-                    `Протокол:   ${data.protocol ?? "—"}${data.settleMs ? `, пауза ${data.settleMs} мс` : ""}`,
-                    `Последняя:  ${data.lastSent ?? "—"}`,
+                    `Config:     ${data.configPath}`,
+                    `Address:    ${data.address ?? "(not set — search by name)"}`,
+                    `Name:       ${data.name}`,
+                    `Model:      ${data.model ?? "(auto-detected)"}`,
+                    `Connection: ${data.connected ? `active with ${data.deviceName ?? "?"}` : "none"}`,
+                    `Protocol:   ${data.protocol ?? "—"}${data.settleMs ? `, settle ${data.settleMs} ms` : ""}`,
+                    `Last:       ${data.lastSent ?? "—"}`,
                 ].join("\n"),
             )
         })
 
     program
         .command("info")
-        .description("подключиться и показать GATT-профиль (сервисы и характеристики)")
+        .description("connect and show the GATT profile (services and characteristics)")
         .action(async () => {
             const opts = globals()
             const info = await withLed(opts, (led) => led.info())
             print(opts, info, (data) => {
                 const lines = [
-                    `Устройство: ${data.name ?? "(без имени)"} [${data.address ?? "?"}] ${signalText(data.rssi)}`,
-                    `Модель:     ${data.model}`,
-                    `Запись:     ${data.writeUuid}`,
+                    `Device:     ${data.name ?? "(no name)"} [${data.address ?? "?"}] ${signalText(data.rssi)}`,
+                    `Model:      ${data.model}`,
+                    `Write:      ${data.writeUuid}`,
                     `Notify:     ${data.notifyUuid}`,
-                    `Пауза:      ${data.settleMs} мс между командами`,
-                    "Сервисы:",
+                    `Settle:     ${data.settleMs} ms between commands`,
+                    "Services:",
                 ]
                 for (const service of data.services) {
                     lines.push(`  ${service.uuid}`)
@@ -203,69 +203,69 @@ export function createProgram(): Command {
 
     sendCommand(
         "on",
-        "включить ленту",
+        "turn the strip on",
         () => (protocol) => protocol.turnOn(),
-        (result) => `Включено. Отправлено: ${result.sent.join(" | ")}`,
+        (result) => `On. Sent: ${result.sent.join(" | ")}`,
     )
 
     sendCommand(
         "off",
-        "выключить ленту",
+        "turn the strip off",
         () => (protocol) => protocol.turnOff(),
-        (result) => `Выключено. Отправлено: ${result.sent.join(" | ")}`,
+        (result) => `Off. Sent: ${result.sent.join(" | ")}`,
     )
 
     sendCommand(
         "color",
-        "задать цвет: #ff8800, ff8800, или 255,136,0",
+        "set color: #ff8800, ff8800 or 255,136,0",
         ([value]) => {
             const rgb = parseColor(value ?? "")
             return (protocol) => protocol.color(rgb)
         },
-        (result) => `Цвет задан. Отправлено: ${result.sent.join(" | ")}`,
+        (result) => `Color set. Sent: ${result.sent.join(" | ")}`,
         [{ name: "value", description: "#rrggbb | rrggbb | r,g,b" }],
     )
 
     sendCommand(
         "white",
-        "белый свет, яркость в процентах (0-100)",
+        "white light, brightness in percent (0-100)",
         ([value]) => {
             const percent = toPercent(value ?? "", "white")
             return (protocol) => protocol.white(percent)
         },
-        (result) => `Белый ${result.sent.length ? "включён" : "не отправлен"}. Отправлено: ${result.sent.join(" | ")}`,
+        (result) => `White ${result.sent.length ? "on" : "not sent"}. Sent: ${result.sent.join(" | ")}`,
         [{ name: "percent", description: "0-100" }],
     )
 
     sendCommand(
         "brightness",
-        "яркость в процентах (0-100)",
+        "brightness in percent (0-100)",
         ([value]) => {
             const percent = toPercent(value ?? "", "brightness")
             return (protocol) => protocol.brightness(percent)
         },
-        (result) => `Яркость изменена. Отправлено: ${result.sent.join(" | ")}`,
+        (result) => `Brightness changed. Sent: ${result.sent.join(" | ")}`,
         [{ name: "percent", description: "0-100" }],
     )
 
     sendCommand(
         "kelvin",
-        "цветовая температура, K (обычно 1800-7000)",
+        "color temperature, K (usually 1800-7000)",
         ([value]) => {
             const kelvin = Number(value)
-            if (!Number.isFinite(kelvin)) throw new Error("kelvin: ожидается число")
+            if (!Number.isFinite(kelvin)) throw new Error("kelvin: expected a number")
             return (protocol) => protocol.colorTemp(kelvin)
         },
-        (result) => `Температура задана. Отправлено: ${result.sent.join(" | ")}`,
-        [{ name: "kelvin", description: "например 3000" }],
+        (result) => `Temperature set. Sent: ${result.sent.join(" | ")}`,
+        [{ name: "kelvin", description: "e.g. 3000" }],
     )
 
     sendCommand(
         "effect",
-        "включить эффект по номеру (0-127, 128-135 — режимы с микрофоном)",
+        "turn on an effect by number (0-127, 128-135 — microphone modes)",
         ([value, speed, brightness]) => {
             const index = Number(value)
-            if (!Number.isFinite(index)) throw new Error("effect: ожидается номер эффекта")
+            if (!Number.isFinite(index)) throw new Error("effect: expected an effect number")
             const speedValue = speed === undefined ? undefined : Number(speed)
             const brightnessValue = brightness === undefined ? undefined : toPercent(brightness, "brightness")
             return (protocol) => {
@@ -276,41 +276,41 @@ export function createProgram(): Command {
                 return packets
             }
         },
-        (result) => `Эффект включён (${result.model}). Отправлено: ${result.sent.join(" | ")}`,
+        (result) => `Effect on (${result.model}). Sent: ${result.sent.join(" | ")}`,
         [
-            { name: "index", description: "номер эффекта" },
-            { name: "speed", description: "скорость, необязательно", optional: true },
-            { name: "brightness", description: "яркость 0-100, необязательно", optional: true },
+            { name: "index", description: "effect number" },
+            { name: "speed", description: "speed, optional", optional: true },
+            { name: "brightness", description: "brightness 0-100, optional", optional: true },
         ],
     )
 
     sendCommand(
         "speed",
-        "скорость текущего эффекта",
+        "speed of the current effect",
         ([value]) => {
             const speed = Number(value)
-            if (!Number.isFinite(speed)) throw new Error("speed: ожидается число")
+            if (!Number.isFinite(speed)) throw new Error("speed: expected a number")
             return (protocol) => protocol.speed(speed)
         },
-        (result) => `Скорость задана. Отправлено: ${result.sent.join(" | ")}`,
+        (result) => `Speed set. Sent: ${result.sent.join(" | ")}`,
         [{ name: "value", description: "0-255" }],
     )
 
     sendCommand(
         "raw",
-        "отправить произвольный пакет в hex (для отладки протокола)",
+        "send a raw hex packet (for protocol debugging)",
         ([value]) => {
             const packet = parseHexPacket(value ?? "")
             return () => packet
         },
-        (result) => `Отправлено: ${result.sent.join(" | ")}`,
-        [{ name: "hex", description: "например '7e 04 04 f0 00 01 ff 00 ef'" }],
+        (result) => `Sent: ${result.sent.join(" | ")}`,
+        [{ name: "hex", description: "e.g. '7e 04 04 f0 00 01 ff 00 ef'" }],
     )
 
     program
         .command("watch")
-        .description("слушать notify-канал (контроллер отвечает эхом наших же команд)")
-        .option("-d, --duration <seconds>", "сколько слушать", "15")
+        .description("listen to the notify channel (the controller echoes our own commands)")
+        .option("-d, --duration <seconds>", "how long to listen", "15")
         .action(async (cmd: { duration: string }) => {
             const opts = globals()
             const durationMs = toMilliseconds(cmd.duration, "--duration")
@@ -319,15 +319,15 @@ export function createProgram(): Command {
                 led.watch(durationMs, (packet) => {
                     collected.push(packet)
                     if (!opts.json) {
-                        const note = packet.state ? "состояние" : packet.looksLikeEcho ? "эхо" : "?"
+                        const note = packet.state ? "state" : packet.looksLikeEcho ? "echo" : "?"
                         process.stdout.write(`  ${packet.raw}   (${note})\n`)
                     }
                 }),
             )
             print(opts, result, (data) =>
                 data.packets.length === 0
-                    ? `Тишина в ${data.notifyUuid} за ${Math.round(durationMs / 1000)} с — контроллер не отвечает на пассивное слушание.`
-                    : `Получено пакетов: ${data.packets.length}`,
+                    ? `Silence on ${data.notifyUuid} for ${Math.round(durationMs / 1000)} s — the controller does not answer passive listening.`
+                    : `Packets received: ${data.packets.length}`,
             )
         })
 
@@ -335,7 +335,7 @@ export function createProgram(): Command {
 
     program
         .command("models")
-        .description("список поддерживаемых моделей контроллеров")
+        .description("list of supported controller models")
         .action(() => {
             const opts = globals()
             const models = listModels().map((model) => ({
@@ -349,7 +349,7 @@ export function createProgram(): Command {
                 data
                     .map(
                         (model) =>
-                            `${model.name.padEnd(16)} ${String(model.settleMs).padStart(4)} мс  ${model.writeUuid}  [${model.commands.join(", ")}]`,
+                            `${model.name.padEnd(16)} ${String(model.settleMs).padStart(4)} ms  ${model.writeUuid}  [${model.commands.join(", ")}]`,
                     )
                     .join("\n"),
             )
@@ -357,7 +357,7 @@ export function createProgram(): Command {
 
     program
         .command("devices")
-        .description("список сохранённых лент (алиас → адрес/имя/модель), * — по умолчанию")
+        .description("list of saved strips (alias → address/name/model), * — the default one")
         .action(() => {
             const opts = globals()
             const devices = listDevices()
@@ -366,16 +366,16 @@ export function createProgram(): Command {
                 const aliases = Object.keys(data.devices).sort()
                 if (aliases.length === 0) {
                     return (
-                        "Сохранённых лент нет.\n" +
-                        "Сначала найди адрес:  ble-mcp scan\n" +
-                        "Затем привяжи:        ble-mcp attach <имя> <MAC>   (например: attach спальня AA:BB:CC:DD:EE:FF)"
+                        "No saved strips.\n" +
+                        "Find the address first:  ble-mcp scan\n" +
+                        "Then attach it:          ble-mcp attach <name> <MAC>   (for example: attach bedroom AA:BB:CC:DD:EE:FF)"
                     )
                 }
                 return aliases
                     .map((alias) => {
                         const entry = data.devices[alias]
                         const mark = alias === data.default ? "*" : " "
-                        const where = entry?.address ?? (entry?.name ? `по имени ${entry.name}` : "адрес неизвестен")
+                        const where = entry?.address ?? (entry?.name ? `by name ${entry.name}` : "address unknown")
                         const model = entry?.model ? ` [${entry.model}]` : ""
                         return `${mark} ${alias.padEnd(16)} ${where}${model}`
                     })
@@ -385,12 +385,12 @@ export function createProgram(): Command {
 
     program
         .command("attach")
-        .description("привязать найденное устройство под именем (алиасом), например 'спальня'")
-        .argument("<alias>", "имя ленты, например 'спальня' или 'гостиная'")
-        .argument("[mac]", "MAC-адрес из scan (если ещё неизвестен — укажи --dev-name)")
-        .option("--dev-name <name>", "имя устройства в эфире (если MAC пока неизвестен)")
-        .option("--dev-model <model>", "принудительная модель из реестра")
-        .option("--default", "сделать устройством по умолчанию")
+        .description("attach a discovered device under a name (alias), e.g. 'bedroom'")
+        .argument("<alias>", "strip name, e.g. 'bedroom' or 'living-room'")
+        .argument("[mac]", "MAC address from scan (if still unknown, pass --dev-name)")
+        .option("--dev-name <name>", "advertised device name (if the MAC is not known yet)")
+        .option("--dev-model <model>", "forced model from the registry")
+        .option("--default", "make it the default device")
         .action(
             (
                 alias: string,
@@ -400,7 +400,7 @@ export function createProgram(): Command {
                 const opts = globals()
                 const isNew = !(alias in listDevices())
                 if (isNew && !mac && !cmd.devName) {
-                    throw new Error("укажи MAC (позиционно) или --dev-name, иначе нечего привязывать")
+                    throw new Error("pass the MAC (positionally) or --dev-name, otherwise there is nothing to attach")
                 }
                 const config = addDevice(
                     alias,
@@ -411,50 +411,51 @@ export function createProgram(): Command {
                 print(
                     opts,
                     { path: configPath(), alias, entry: entry ?? null, default: config.default ?? null },
-                    () => `Привязано: «${alias}» → ${entry?.address ?? (entry?.name ? `по имени ${entry.name}` : "?")}`,
+                    () => `Attached: "${alias}" → ${entry?.address ?? (entry?.name ? `by name ${entry.name}` : "?")}`,
                 )
             },
         )
 
     program
         .command("detach")
-        .description("отвязать ленту по имени (алиасу)")
-        .argument("<alias>", "имя ленты")
+        .description("detach a strip by name (alias)")
+        .argument("<alias>", "strip name")
         .action((alias: string) => {
             const opts = globals()
             const config = removeDevice(alias)
-            print(opts, { path: configPath(), alias, default: config.default ?? null }, () => `Отвязано: «${alias}»`)
+            print(opts, { path: configPath(), alias, default: config.default ?? null }, () => `Detached: "${alias}"`)
         })
 
     program
         .command("default")
-        .description("сделать ленту устройством по умолчанию")
-        .argument("<alias>", "имя ленты")
+        .description("make the strip the default device")
+        .argument("<alias>", "strip name")
         .action((alias: string) => {
             const opts = globals()
             const config = setDefaultDevice(alias)
-            print(opts, { path: configPath(), default: config.default ?? null }, () => `По умолчанию: «${alias}»`)
+            print(opts, { path: configPath(), default: config.default ?? null }, () => `Default: "${alias}"`)
         })
 
     // --- MCP --------------------------------------------------------------
 
     program
         .command("serve")
-        .description("запустить MCP-сервер (для агентов: opencode, Claude Desktop, любой MCP-клиент)")
+        .description("start the MCP server (for agents: opencode, Claude Desktop, any MCP client)")
         .option("-t, --transport <kind>", "stdio | http", "stdio")
-        .option("--host <host>", "адрес HTTP-сервера", "127.0.0.1")
-        .option("-p, --port <port>", "порт HTTP-сервера", "8765")
-        .option("--path <path>", "путь HTTP-эндпоинта", "/mcp")
-        .option("--stateless", "HTTP без сессий (проще для прокси)")
+        .option("--host <host>", "HTTP server address", "127.0.0.1")
+        .option("-p, --port <port>", "HTTP server port", "8765")
+        .option("--path <path>", "HTTP endpoint path", "/mcp")
+        .option("--stateless", "HTTP without sessions (simpler behind a proxy)")
         .action(async (cmd: { transport: string; host: string; port: string; path: string; stateless?: boolean }) => {
             const opts = globals()
-            // The server keeps the connection warm, otherwise every agent command
-            // pays for a full scan-and-connect cycle.
-            const warm = opts.warm > 0 ? opts.warm : 120_000
+            // The channel is released as soon as a tool call returns (warm 0 is the
+            // default). A strip is single-client, so holding it between calls would
+            // lock the phone out; batches go into ONE ble_apply call instead.
+            // `--warm <ms>` stays as an explicit opt-in for a warm window.
             const led = new BleLed({
                 target: { address: opts.address, name: opts.name, model: opts.model, device: opts.device },
                 timeoutMs: opts.timeout,
-                warmMs: Number.isFinite(warm) ? warm : 120_000,
+                warmMs: opts.warm,
             })
             const { startStdioServer, startHttpServer } = await import("./mcp.js")
 
@@ -465,7 +466,7 @@ export function createProgram(): Command {
             if (cmd.transport === "http") {
                 const port = Number(cmd.port)
                 if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-                    throw new Error(`--port: некорректный порт ${cmd.port}`)
+                    throw new Error(`--port: invalid port ${cmd.port}`)
                 }
                 const server = await startHttpServer(led, {
                     host: cmd.host,
@@ -473,11 +474,11 @@ export function createProgram(): Command {
                     path: cmd.path.startsWith("/") ? cmd.path : `/${cmd.path}`,
                     stateless: Boolean(cmd.stateless),
                 })
-                log(`MCP (streamable HTTP) слушает http://${cmd.host}:${port}${server.path}`)
-                log("Для opencode: type=remote, url=http://host:port/path")
+                log(`MCP (streamable HTTP) listening on http://${cmd.host}:${port}${server.path}`)
+                log("For opencode: type=remote, url=http://host:port/path")
                 return
             }
-            throw new Error(`--transport принимает только stdio или http, получено "${cmd.transport}"`)
+            throw new Error(`--transport accepts only stdio or http, got "${cmd.transport}"`)
         })
 
     return program

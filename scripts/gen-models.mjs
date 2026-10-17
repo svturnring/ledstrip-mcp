@@ -18,7 +18,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..")
 const source = JSON.parse(readFileSync(join(root, "models", "models.json"), "utf8"))
 
 if (!Array.isArray(source) || source.length === 0) {
-    throw new Error("models/models.json: ожидался непустой массив моделей")
+    throw new Error("models/models.json: expected a non-empty array of models")
 }
 
 const header = `/**
@@ -94,4 +94,4 @@ const body = JSON.stringify(source, null, 4)
     .join("\n")
 
 writeFileSync(join(root, "src", "models.ts"), `${header}${body};\n${footer}`, "utf8")
-console.log(`src/models.ts обновлён: ${source.length} моделей`)
+console.log(`src/models.ts updated: ${source.length} models`)

@@ -103,7 +103,7 @@ The same works from an agent: `ble_scan` → `ble_add_device` → the control to
 | `default <alias>` | switch the default strip |
 | `serve [-t stdio\|http]` | start the MCP server |
 
-Global options: `-a/--address`, `-n/--name`, `-m/--model`, `-D/--device <alias>`, `--timeout <ms>` (how long to wait for the device), `--warm <ms>` (keep the connection alive for), `--json` (machine-readable output), `-v/--verbose`.
+Global options: `-a/--address`, `-n/--name`, `-m/--model`, `-D/--device <alias>`, `--timeout <ms>` (how long to wait for the device), `--warm <ms>` (keep the connection warm after a command; `0`, the default, releases it immediately), `--json` (machine-readable output), `-v/--verbose`.
 
 Examples:
 
@@ -179,14 +179,7 @@ Connecting from opencode:
 | `ble_status` | `device?` | config and connection state |
 | `ble_scan` | `durationSeconds?` | scan the air and hint which devices look like LED strips |
 | `ble_info` | `device?` | GATT profile and detected model |
-| `ble_power` | `state: on\|off`, `device?` | turn on / off |
-| `ble_set_color` | `color`, `device?` | set color |
-| `ble_set_brightness` | `percent`, `device?` | brightness 0-100 |
-| `ble_set_white` | `percent`, `device?` | white 0-100 |
-| `ble_set_color_temperature` | `kelvin`, `device?` | warm / cool temperature |
-| `ble_set_effect` | `index`, `speed?`, `brightness?`, `device?` | effect, optionally with speed and brightness in one call |
-| `ble_set_speed` | `value`, `device?` | speed of the current effect |
-| `ble_send_raw` | `packet`, `device?` | arbitrary packet in hex |
+| `ble_apply` | `actions[]`, `device?` | **one ordered batch of commands over one connection** (see below) |
 | `ble_watch` | `durationSeconds?`, `device?` | listen to the notify channel |
 | `ble_devices` | — | list saved strips, which is the default and which are connected |
 | `ble_add_device` | `device`, `address?`, `name?`, `model?`, `setDefault?` | bind a strip under a name |
@@ -195,7 +188,27 @@ Connecting from opencode:
 
 Every control tool accepts an optional **`device`** argument — the alias of a saved strip (e.g. `"bedroom"`). Without it, the default strip is used.
 
-A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` → `ble_add_device` per strip → control commands with `device`, e.g. `ble_set_color` with `device: "bedroom"`.
+### `ble_apply` — all writing goes through one tool
+
+The connection is released the moment the call returns, so a second tool call would pay for a full reconnect (2-5 s). That is why **all commands belonging to one intent go into a single `ble_apply` call as an ordered array**, instead of being spread over several tools:
+
+```json
+{
+    "device": "bedroom",
+    "actions": [
+        { "type": "power", "state": "on" },
+        { "type": "brightness", "percent": 100 },
+        { "type": "color", "color": "#ff0000" },
+        { "type": "effect", "index": 3 }
+    ]
+}
+```
+
+One `actions[]` entry — one packet. Action types: `power` (`state: on|off`), `color` (`color: "#rrggbb"`), `brightness` (`percent`), `white` (`percent`), `color_temperature` (`kelvin`), `effect` (`index`), `speed` (`value`), `raw` (`hex: "7e 04 04 f0 00 01 ff 00 ef"`). Order matters: for conflicting modes the last one wins, and a `speed`/`brightness` that belongs to an effect must come **before** the effect itself. The mandatory settle delay is honoured after every packet, in order.
+
+An action the detected model does not support is **skipped and reported** while the rest are still applied — the answer lists `applied` and `skipped` per index.
+
+A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` → `ble_add_device` per strip → `ble_apply` with `device`, e.g. `{"device":"bedroom","actions":[{"type":"color","color":"#ff0000"}]}`.
 
 ## Configuration
 
@@ -226,7 +239,7 @@ src/models.ts    — model registry (generated from models/models.json)
 src/protocol.ts  — packet building/parsing, input parsers, model detection, device-name classifier
 src/config.ts    — config: named devices, priority rules
 src/log.ts       — logging, always to stderr
-src/ble.ts       — transport: discovery, connection pool (one per strip), write, notify, retries, warm connection
+src/ble.ts       — transport: discovery, connection pool (one per strip), write, notify, retries, release after a command (optional warm window)
 src/cli.ts       — CLI (commander)
 src/mcp.ts       — MCP server (stdio + streamable HTTP)
 src/index.ts     — entry point, dispatches CLI or MCP
@@ -259,7 +272,7 @@ For ELK-BLEDDM the write characteristic is `0000fff3-…` and notify is `0000fff
 2. **The device is write-only.** For any request the controller echoes **our own command** back on the notify channel instead of reporting state. Reading "what color is it now" is impossible; `watch` exists to capture the phone app's protocol, not to poll state. Only a reply with `cmd = 0x01` carries real state (some variants support it) — that case is decoded in `decodePacket`.
 3. **The strip sleeps and is occupied by the phone.** While the phone app holds a connection, the device does not advertise and cannot be connected to (hence the explicit error with a hint). BlueZ remembers devices from cache, so discovery is always started before connecting — that wakes the strip and puts it in the cache.
 
-Plus the `warm` mode in the MCP server: the connection is kept for 2 minutes after the last command, otherwise every agent command pays for a full scan-and-connect cycle.
+**Plus: the channel is released immediately after a command.** A strip is single-client and stops advertising while anything is connected to it, so holding the connection locks the phone (and any other client) out. The default `warm 0` therefore frees the strip as soon as the call returns, and `try/finally` guarantees that on every path — success, failed write, exception and a dropped link. The reconnect cost (2-5 s) is not hidden by holding the connection, but paid once per **batch**: commands that belong together go into a single `ble_apply` call, which is exactly why the MCP surface is one aggregating tool instead of one tool per command. `--warm <ms>` remains as an explicit opt-in for callers that prefer a warm window over a free strip.
 
 ### Model registry
 
@@ -277,20 +290,20 @@ The model is detected from the device name (prefix match, longest match wins, th
 npm run build       # tsc → dist/
 npm run typecheck   # no emit
 npm run dev         # tsc --watch (run with: node dist/index.js …)
-npm test            # build + node:test over the protocol layer
+npm test            # build + node:test (protocol, config, transport, MCP tools)
 npm run format      # prettier
 npm run check       # typecheck + tests
 ```
 
-Tests need no hardware: they cover packet building (reference bytes captured from a real ELK-BLEDDM), input parsers and notification decoding. Live verification is done with `ble-mcp on/off/color` — since the controller reports no state, "did it go through" can only be confirmed by looking at the strip.
+Tests need no hardware: packet building is checked against reference bytes captured from a real ELK-BLEDDM, plus input parsers, notification decoding, and the transport/MCP layers against a fake BLE session — the invariants there are that a batch of commands shares one connection and that the channel is released when the call returns. Live verification is done with `ble-mcp on/off/color` — since the controller reports no state, "did it go through" can only be confirmed by looking at the strip.
 
 ## Gotchas
 
 - **The phone.** The app holds the connection, so the strip does not advertise. Close the app.
-- **One client per strip.** A BLE peripheral accepts a single client. A running MCP server with a warm connection occupies that strip: the CLI cannot connect to it at that moment (and vice versa). Different strips are independent and can be connected at the same time.
+- **One client per strip.** A BLE peripheral accepts a single client. Between calls the strip is free (the connection is released right after each command), but while a command or a batch is in flight nobody else can reach it. With an explicit `--warm <ms>` window the strip is held for that whole window, so the CLI or the phone cannot connect to it in the meantime. Different strips are independent and can be connected at the same time.
 - **Names are not reliable.** BLE device names are arbitrary and do **not** have to start with "BLE" (e.g. `ELK-BLEDDM`, `LEDBLE-…`, `Triones-…`, or a random string). Use the hint in `ble_scan` / `ble_add_device` to tell strips apart, and prefer the MAC address as the durable key.
 - **BlueZ cache.** `adapter.devices()` also returns stale entries. In `scan` such devices have no RSSI and are marked as "from cache".
-- **`--warm 0` (CLI default).** The CLI disconnects right after the command. For a series of fast commands use either `--warm 60000` or the MCP server.
+- **`warm 0` is the default everywhere.** The connection is released right after the command. For a fast series of commands: in MCP it is one `ble_apply` call with an ordered `actions[]`; in the CLI it is `--warm 60000`, which holds the connection between the commands you type.
 - **App and MCP at the same time.** Capturing the app's protocol (`watch`) only works while our side is not writing: the controller echoes commands but never sends anything passively.
 
 ## License

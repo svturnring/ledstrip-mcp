@@ -31,78 +31,78 @@ function seed(config) {
     writeFileSync(configPath(), `${JSON.stringify(config, null, 2)}\n`, "utf8")
 }
 
-test("addDevice создаёт и обновляет именованные устройства", () => {
+test("addDevice creates and updates named devices", () => {
     seed({})
-    addDevice("спальня", { address: "AA:BB:CC:DD:EE:01", name: "ELK-BLEDDM" })
-    addDevice("гостиная", { address: "AA:BB:CC:DD:EE:02" }, { makeDefault: true })
+    addDevice("bedroom", { address: "AA:BB:CC:DD:EE:01", name: "ELK-BLEDDM" })
+    addDevice("living-room", { address: "AA:BB:CC:DD:EE:02" }, { makeDefault: true })
 
     const devices = listDevices()
-    assert.equal(devices["спальня"].address, "AA:BB:CC:DD:EE:01")
-    assert.equal(devices["спальня"].name, "ELK-BLEDDM")
-    assert.equal(devices["гостиная"].address, "AA:BB:CC:DD:EE:02")
-    assert.equal(defaultDevice(), "гостиная")
+    assert.equal(devices["bedroom"].address, "AA:BB:CC:DD:EE:01")
+    assert.equal(devices["bedroom"].name, "ELK-BLEDDM")
+    assert.equal(devices["living-room"].address, "AA:BB:CC:DD:EE:02")
+    assert.equal(defaultDevice(), "living-room")
 
     // Merging keeps untouched fields.
-    addDevice("спальня", { model: "ELK-BLEDOM" })
-    assert.equal(listDevices()["спальня"].address, "AA:BB:CC:DD:EE:01")
-    assert.equal(listDevices()["спальня"].model, "ELK-BLEDOM")
+    addDevice("bedroom", { model: "ELK-BLEDOM" })
+    assert.equal(listDevices()["bedroom"].address, "AA:BB:CC:DD:EE:01")
+    assert.equal(listDevices()["bedroom"].model, "ELK-BLEDOM")
 })
 
-test("removeDevice убирает устройство и сбрасывает default", () => {
+test("removeDevice removes a device and resets the default", () => {
     seed({})
-    addDevice("спальня", { address: "AA:BB:CC:DD:EE:01" }, { makeDefault: true })
-    removeDevice("спальня")
-    assert.equal(listDevices()["спальня"], undefined)
+    addDevice("bedroom", { address: "AA:BB:CC:DD:EE:01" }, { makeDefault: true })
+    removeDevice("bedroom")
+    assert.equal(listDevices()["bedroom"], undefined)
     assert.equal(defaultDevice(), undefined)
-    assert.throws(() => removeDevice("спальня"), /не найдено в конфиге/)
+    assert.throws(() => removeDevice("bedroom"), /is not present in the config/)
 })
 
-test("setDefaultDevice требует существующее устройство", () => {
+test("setDefaultDevice requires an existing device", () => {
     seed({})
-    addDevice("спальня", { address: "AA:BB:CC:DD:EE:01" })
-    addDevice("гостиная", { address: "AA:BB:CC:DD:EE:02" })
-    setDefaultDevice("гостиная")
-    assert.equal(defaultDevice(), "гостиная")
-    assert.throws(() => setDefaultDevice("кухня"), /не найдено в конфиге/)
+    addDevice("bedroom", { address: "AA:BB:CC:DD:EE:01" })
+    addDevice("living-room", { address: "AA:BB:CC:DD:EE:02" })
+    setDefaultDevice("living-room")
+    assert.equal(defaultDevice(), "living-room")
+    assert.throws(() => setDefaultDevice("kitchen"), /is not present in the config/)
 })
 
-test("resolveTarget берёт адрес из алиаса устройства", () => {
+test("resolveTarget takes the address from the device alias", () => {
     seed({
-        default: "гостиная",
+        default: "living-room",
         devices: {
-            гостиная: { address: "AA:BB:CC:DD:EE:02", name: "ELK-BLEDOM" },
-            спальня: { address: "AA:BB:CC:DD:EE:01", name: "ELK-BLEDDM" },
+            "living-room": { address: "AA:BB:CC:DD:EE:02", name: "ELK-BLEDOM" },
+            bedroom: { address: "AA:BB:CC:DD:EE:01", name: "ELK-BLEDDM" },
         },
     })
 
-    const byAlias = resolveTarget({ device: "спальня" })
+    const byAlias = resolveTarget({ device: "bedroom" })
     assert.equal(byAlias.address, "AA:BB:CC:DD:EE:01")
     assert.equal(byAlias.name, "ELK-BLEDDM")
-    assert.equal(byAlias.device, "спальня")
+    assert.equal(byAlias.device, "bedroom")
 
     // No alias — the config default applies.
     const fallback = resolveTarget()
     assert.equal(fallback.address, "AA:BB:CC:DD:EE:02")
-    assert.equal(fallback.device, "гостиная")
+    assert.equal(fallback.device, "living-room")
 })
 
-test("resolveTarget: явные аргументы важнее конфига", () => {
-    seed({ devices: { спальня: { address: "AA:BB:CC:DD:EE:01" } } })
-    const target = resolveTarget({ device: "спальня", address: "11:22:33:44:55:66" })
+test("resolveTarget: explicit arguments win over the config", () => {
+    seed({ devices: { bedroom: { address: "AA:BB:CC:DD:EE:01" } } })
+    const target = resolveTarget({ device: "bedroom", address: "11:22:33:44:55:66" })
     assert.equal(target.address, "11:22:33:44:55:66")
 })
 
-test("resolveTarget ругается на неизвестный алиас", () => {
-    seed({ devices: { спальня: { address: "AA:BB:CC:DD:EE:01" } } })
-    assert.throws(() => resolveTarget({ device: "кухня" }), /не найдено в конфиге/)
+test("resolveTarget rejects an unknown alias", () => {
+    seed({ devices: { bedroom: { address: "AA:BB:CC:DD:EE:01" } } })
+    assert.throws(() => resolveTarget({ device: "kitchen" }), /is not present in the config/)
 })
 
-test("resolveTarget без настроенных устройств даёт понятную ошибку", () => {
+test("resolveTarget without configured devices gives a clear error", () => {
     seed({})
-    assert.throws(() => resolveTarget(), /устройства ещё не привязаны/)
+    assert.throws(() => resolveTarget(), /no devices attached yet/)
 })
 
-test("resolveTarget: ad-hoc аргументы работают без конфига", () => {
+test("resolveTarget: ad-hoc arguments work without a config", () => {
     seed({})
     const target = resolveTarget({ address: "AA:BB:CC:DD:EE:09", model: "ELK-BLEDOM" })
     assert.equal(target.address, "AA:BB:CC:DD:EE:09")
@@ -110,7 +110,7 @@ test("resolveTarget: ad-hoc аргументы работают без конф�
     assert.equal(target.device, undefined)
 })
 
-test("classifyDeviceName: реестр, эвристика и мусор", () => {
+test("classifyDeviceName: registry, heuristics and junk", () => {
     const known = classifyDeviceName("ELK-BLEDDM")
     assert.equal(known.likely, true)
     assert.equal(known.confidence, "model")
@@ -128,7 +128,7 @@ test("classifyDeviceName: реестр, эвристика и мусор", () =>
     assert.equal(anonymous.likely, false)
 })
 
-test("loadConfig возвращает объект даже без файла", () => {
+test("loadConfig returns an object even without a file", () => {
     seed({})
     assert.deepEqual(loadConfig(), {})
 })

@@ -6,14 +6,14 @@
  * an optional default:
  *
  *       {
- *         "default": "спальня",
+ *         "default": "bedroom",
  *         "devices": {
- *           "гостиная": { "address": "AA:BB:CC:DD:EE:01", "name": "ELK-BLEDDM" },
- *           "спальня":  { "address": "AA:BB:CC:DD:EE:02", "name": "ELK-BLEDOM" }
+ *           "living-room": { "address": "AA:BB:CC:DD:EE:01", "name": "ELK-BLEDDM" },
+ *           "bedroom":     { "address": "AA:BB:CC:DD:EE:02", "name": "ELK-BLEDOM" }
  *         }
  *       }
  *
- * Every strip is addressed by its alias ("спальня"): commands take a `device`,
+ * Every strip is addressed by its alias ("bedroom"): commands take a `device`,
  * and per-call address/name/model arguments exist only for one-off runs and are
  * never persisted.
  */
@@ -108,12 +108,12 @@ export function defaultDevice(): string | undefined {
 
 /**
  * Attach (or update) a named device. A non-empty alias is required; the entry
- * is merged over any existing one, so `attach "спальня"` alone only ensures the
+ * is merged over any existing one, so `attach "bedroom"` alone only ensures the
  * device exists.
  */
 export function addDevice(alias: string, entry: BleDeviceEntry, options: { makeDefault?: boolean } = {}): BleConfig {
     const name = alias.trim()
-    if (!name) throw new Error("имя устройства (алиас) не может быть пустым")
+    if (!name) throw new Error("device alias cannot be empty")
     const config = loadConfig()
     const devices = { ...(config.devices ?? {}) }
     devices[name] = { ...(devices[name] ?? {}), ...entry }
@@ -127,7 +127,7 @@ export function addDevice(alias: string, entry: BleDeviceEntry, options: { makeD
 export function removeDevice(alias: string): BleConfig {
     const config = loadConfig()
     if (!config.devices || !(alias in config.devices)) {
-        throw new Error(`устройство «${alias}» не найдено в конфиге`)
+        throw new Error(`device "${alias}" is not present in the config`)
     }
     delete config.devices[alias]
     if (config.default === alias) delete config.default
@@ -139,7 +139,7 @@ export function removeDevice(alias: string): BleConfig {
 export function setDefaultDevice(alias: string): BleConfig {
     const config = loadConfig()
     if (!config.devices || !(alias in config.devices)) {
-        throw new Error(`устройство «${alias}» не найдено в конфиге`)
+        throw new Error(`device "${alias}" is not present in the config`)
     }
     config.default = alias
     writeConfig(prune(config))
@@ -163,8 +163,8 @@ export function resolveTarget(overrides: Partial<Target> = {}): Target {
     if (alias && !entry) {
         const known = Object.keys(config.devices ?? {})
         throw new Error(
-            `устройство «${alias}» не найдено в конфиге` +
-                (known.length ? `. Известные: ${known.join(", ")}` : ". Добавь его через attach / ble_add_device."),
+            `device "${alias}" is not present in the config` +
+                (known.length ? `. Known: ${known.join(", ")}` : ". Add it with attach / ble_add_device."),
         )
     }
 
@@ -176,8 +176,8 @@ export function resolveTarget(overrides: Partial<Target> = {}): Target {
         const known = Object.keys(config.devices ?? {})
         throw new Error(
             known.length
-                ? `устройство не задано. Укажи device (-D / аргумент device) или настрой default (сейчас: ${known.join(", ")}).`
-                : "устройства ещё не привязаны: сделай scan, затем attach / ble_add_device.",
+                ? `no device configured. Pass device (-D / the device argument) or set a default (current: ${known.join(", ")}).`
+                : "no devices attached yet: run scan, then attach / ble_add_device.",
         )
     }
 
