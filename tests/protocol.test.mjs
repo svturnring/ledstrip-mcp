@@ -184,3 +184,32 @@ test("the speed range comes from the model", () => {
     // Out-of-range speed is clamped, not wrapped.
     assert.equal(bleddm.speed(9999)[3], 255)
 })
+
+test("microphone commands match the upstream packets", () => {
+    // Verified against elkbledom's elkbledom.py (enable/disable/set_mic_*)
+    // and against the physical ELK-BLEDDM strip.
+    const protocol = Protocol.forDevice("ELK-BLEDDM")
+    assert.equal(hex(protocol.mic("on")), "7e 04 07 01 ff ff ff 00 ef")
+    assert.equal(hex(protocol.mic("off")), "7e 04 07 00 ff ff ff 00 ef")
+    assert.equal(hex(protocol.micSensitivity(80)), "7e 04 06 50 ff ff ff 00 ef")
+    // Sensitivity is clamped to the controller's 0-100 scale.
+    assert.equal(hex(protocol.micSensitivity(250)), "7e 04 06 64 ff ff ff 00 ef")
+    assert.equal(hex(protocol.micEffect(0x80)), "7e 05 03 80 04 ff ff 00 ef")
+    assert.equal(hex(protocol.micEffect("mic_rhythm")), "7e 05 03 81 04 ff ff 00 ef")
+    // Out of range is an explicit error, not a clamped guess.
+    assert.throws(() => protocol.micEffect(0x88), /must be 128-135/)
+    assert.throws(() => protocol.micEffect("no-such-mode"), /unknown mic mode/)
+})
+
+test("effect 128-135 routes to the mic packet, not the animation-table packet", () => {
+    // The generic effect packet (byte1=00, byte4=03) is silently ignored by
+    // the controller for mic modes — verified live: the strip stayed on the
+    // previous color. The mic packet (byte1=05, byte4=04) works.
+    const protocol = Protocol.forDevice("ELK-BLEDDM")
+    assert.equal(hex(protocol.effect(128)), hex(protocol.micEffect(0x80)))
+    // Regular effects keep the model's own template.
+    assert.equal(hex(protocol.effect(150)), "7e 00 03 96 03 00 00 00 ef")
+    // Mic mode by name resolves through resolveEffect as well.
+    assert.equal(protocol.resolveEffect("mic_rhythm"), 129)
+    assert.equal(hex(protocol.effect(protocol.resolveEffect("mic_spectrum"))), hex(protocol.micEffect(0x82)))
+})

@@ -26,6 +26,7 @@ import { log, setVerbose } from "./log.js"
 import {
     effectsForClass,
     listModels,
+    MIC_EFFECT_MODES,
     parseColor,
     parseHexPacket,
     Protocol,
@@ -313,6 +314,41 @@ export function createProgram(): Command {
     )
 
     sendCommand(
+        "mic",
+        "turn the controller's microphone on|off (music reaction runs on the strip itself)",
+        ([value]) => {
+            const state = (value ?? "").toLowerCase()
+            if (state !== "on" && state !== "off") throw new Error("mic: expected on or off")
+            return (protocol) => protocol.mic(state)
+        },
+        (result) => `Microphone ${result.sent.length ? "switched" : "not sent"}. Sent: ${result.sent.join(" | ")}`,
+        [{ name: "state", description: "on | off" }],
+    )
+
+    sendCommand(
+        "mic-sensitivity",
+        "microphone sensitivity in percent (0-100)",
+        ([value]) => {
+            const percent = toPercent(value ?? "", "mic-sensitivity")
+            return (protocol) => protocol.micSensitivity(percent)
+        },
+        (result) => `Sensitivity set. Sent: ${result.sent.join(" | ")}`,
+        [{ name: "percent", description: "0-100" }],
+    )
+
+    sendCommand(
+        "mic-effect",
+        "microphone reaction mode by name or number (see 'effects'; e.g. mic_rhythm or 129)",
+        ([value]) => {
+            const wanted = value ?? ""
+            if (!wanted) throw new Error("mic-effect: pass a mode name or number (see: ble-mcp effects)")
+            return (protocol) => protocol.micEffect(wanted)
+        },
+        (result) => `Mic mode on (${result.model}). Sent: ${result.sent.join(" | ")}`,
+        [{ name: "mode", description: "mode name (see effects) or number 128-135" }],
+    )
+
+    sendCommand(
         "raw",
         "send a raw hex packet (for protocol debugging)",
         ([value]) => {
@@ -407,6 +443,8 @@ export function createProgram(): Command {
                 effectSpeedRange: protocol.effectSpeedRange,
                 count: protocol.effects.length,
                 effects: protocol.effects.map((effect) => ({ index: effect.index, name: effect.name })),
+                micModes: MIC_EFFECT_MODES.map((mode) => ({ index: mode.index, name: mode.name })),
+                micSensitivityRange: { min: 0, max: 100 },
             }
             print(opts, payload, (data) => {
                 const lines = [
@@ -415,6 +453,10 @@ export function createProgram(): Command {
                         (data.supportsEffects ? "" : " · this model has no effect command"),
                 ]
                 for (const effect of data.effects) lines.push(`  ${String(effect.index).padStart(4)}  ${effect.name}`)
+                if (data.supportsEffects) {
+                    lines.push("microphone reaction modes (controller's own mic; 'mic on' first):")
+                    for (const mode of data.micModes) lines.push(`  ${String(mode.index).padStart(4)}  ${mode.name}`)
+                }
                 return lines.join("\n")
             })
         })

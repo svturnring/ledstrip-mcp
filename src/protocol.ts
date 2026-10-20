@@ -39,6 +39,31 @@ export { settleMsFor, MODELS } from "./models.js"
 export type { EffectDef } from "./effects.js"
 export { effectsForClass, EFFECT_CLASS_NAMES } from "./effects.js"
 
+/**
+ * Microphone reaction modes (0x80-0x87), analyzed by the controller's OWN
+ * microphone — no audio is streamed over BLE, so switching a mode is a
+ * one-shot command like any other effect.
+ *
+ * Names and values are pinned from elkbledom's const.py (MIC_EFFECTS enum);
+ * the packets are sent hardcoded upstream, not per model. The phone apps
+ * (LotusLanternX) expose fewer named modes over the same range — verify
+ * against the hardware before trusting any name-to-behavior mapping.
+ */
+export const MIC_EFFECT_MODES: readonly EffectDef[] = [
+    { name: "mic_energic", index: 0x80 },
+    { name: "mic_rhythm", index: 0x81 },
+    { name: "mic_spectrum", index: 0x82 },
+    { name: "mic_rolling", index: 0x83 },
+    { name: "mic_effect_4", index: 0x84 },
+    { name: "mic_effect_5", index: 0x85 },
+    { name: "mic_effect_6", index: 0x86 },
+    { name: "mic_effect_7", index: 0x87 },
+]
+
+/** Range of microphone modes, inclusive. */
+export const MIC_EFFECT_MIN = 0x80
+export const MIC_EFFECT_MAX = 0x87
+
 export interface Rgb {
     r: number
     g: number
@@ -244,7 +269,48 @@ export class Protocol {
 
     /** Effect index (0-127 on most models, 128-135 are mic modes). */
     effect(value: number): Buffer {
-        return this.build("effect", { v: clamp(Math.round(value), 0, this.effectRange.max) }, "effect")
+        const index = Math.round(value)
+        // 128-135 are microphone modes, not entries of the animation table:
+        // the controller ignores them in the generic effect packet (verified
+        // on ELK-BLEDDM — the strip stayed on the previous color) and only
+        // reacts to the dedicated mic-effect packet shape (byte1=05, byte4=04).
+        if (index >= MIC_EFFECT_MIN && index <= MIC_EFFECT_MAX && this.supportsEffects) {
+            return this.micEffect(index)
+        }
+        return this.build("effect", { v: clamp(index, 0, this.effectRange.max) }, "effect")
+    }
+
+    /**
+     * Switch the microphone reaction mode (0x80-0x87 / name): the controller
+     * analyzes sound with its OWN microphone — one-shot, no audio streaming.
+     * Packet shape is hardcoded in the upstream integration for all models.
+     */
+    micEffect(value: number | string): Buffer {
+        if (!this.supportsEffects) {
+            throw new Error(`model ${this.name} does not support the command "effect"`)
+        }
+        const index = typeof value === "number" ? Math.round(value) : this.resolveMicEffect(value)
+        if (index < MIC_EFFECT_MIN || index > MIC_EFFECT_MAX) {
+            const known = MIC_EFFECT_MODES.map((mode) => mode.name).join(", ")
+            throw new Error(
+                `mic effect must be ${MIC_EFFECT_MIN}-${MIC_EFFECT_MAX} (0x80-0x87), got ${index}. Known modes: ${known}`,
+            )
+        }
+        return Buffer.from([HEADER, 0x05, 0x03, index, 0x04, 0xff, 0xff, 0x00, FOOTER])
+    }
+
+    /**
+     * Turn the controller's microphone on/off. Upstream sends these packets
+     * hardcoded for every model (the regular registry has no mic commands).
+     */
+    mic(state: "on" | "off"): Buffer {
+        return Buffer.from([HEADER, 0x04, 0x07, state === "on" ? 0x01 : 0x00, 0xff, 0xff, 0xff, 0x00, FOOTER])
+    }
+
+    /** Microphone sensitivity, 0-100 (the controller's own scale, not percents of anything else). */
+    micSensitivity(value: number): Buffer {
+        const level = clamp(Math.round(value), 0, 100)
+        return Buffer.from([HEADER, 0x04, 0x06, level, 0xff, 0xff, 0xff, 0x00, FOOTER])
     }
 
     /** Effect speed. */
@@ -301,11 +367,32 @@ export class Protocol {
         const wanted = normalizeEffectName(trimmed)
         const found = this.effects.find((effect) => normalizeEffectName(effect.name) === wanted)
         if (found) return found.index
-        const known = this.effects.map((effect) => effect.name).join(", ")
+        // Mic modes are not in the effect catalogs but are addressable by name too.
+        const micMode = MIC_EFFECT_MODES.find((mode) => normalizeEffectName(mode.name) === wanted)
+        if (micMode) return micMode.index
+        const known = [...this.effects.map((effect) => effect.name), ...MIC_EFFECT_MODES.map((mode) => mode.name)].join(
+            ", ",
+        )
         throw new Error(
             `unknown effect "${value}" for ${this.name}` +
                 (known ? `. Known effects: ${known}` : " (this model has no effect catalog)"),
         )
+    }
+
+    /**
+     * Turn a microphone-mode reference into 0x80-0x87: a number (also accepted
+     * as "128"-style decimal) or a mode name ("mic_rhythm"), matched the same
+     * tolerant way as effect names.
+     */
+    resolveMicEffect(value: number | string): number {
+        if (typeof value === "number") return Math.round(value)
+        const trimmed = value.trim()
+        if (/^\d+$/.test(trimmed)) return Number(trimmed)
+        const wanted = normalizeEffectName(trimmed)
+        const found = MIC_EFFECT_MODES.find((mode) => normalizeEffectName(mode.name) === wanted)
+        if (found) return found.index
+        const known = MIC_EFFECT_MODES.map((mode) => mode.name).join(", ")
+        throw new Error(`unknown mic mode "${value}". Known modes: ${known}`)
     }
 
     /** Color temperature: 1800K (warm) … 7000K (cool). */

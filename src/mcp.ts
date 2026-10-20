@@ -30,7 +30,15 @@ import { z } from "zod"
 import { BleLed, type CommandResult } from "./ble.js"
 import { addDevice, configPath, defaultDevice, listDevices, removeDevice, type Target } from "./config.js"
 import { debug, log, protectStdout } from "./log.js"
-import { effectsForClass, listModels, parseColor, parseHexPacket, Protocol, settleMsFor } from "./protocol.js"
+import {
+    effectsForClass,
+    listModels,
+    MIC_EFFECT_MODES,
+    parseColor,
+    parseHexPacket,
+    Protocol,
+    settleMsFor,
+} from "./protocol.js"
 import { VERSION } from "./version.js"
 
 /** Response: both text for a human and structured data for the agent. */
@@ -115,6 +123,24 @@ const actionSchema = z.discriminatedUnion("type", [
     }),
     z.object({ type: z.literal("speed"), value: z.number().min(0).describe("Effect speed (usually 0-255)") }),
     z.object({
+        type: z.literal("mic"),
+        state: z.enum(["on", "off"]).describe("on — the controller's own microphone on, off — off"),
+    }),
+    z.object({
+        type: z.literal("mic_sensitivity"),
+        percent: z.number().min(0).max(100).describe("Microphone sensitivity 0-100 (controller's mic)"),
+    }),
+    z.object({
+        type: z.literal("mic_effect"),
+        index: z
+            .number()
+            .min(128)
+            .max(135)
+            .optional()
+            .describe("Mic mode number 0x80-0x87 (128-135), see micModes in ble_effects"),
+        name: z.string().optional().describe("Mic mode name, e.g. 'mic_rhythm' (see micModes in ble_effects)"),
+    }),
+    z.object({
         type: z.literal("raw"),
         hex: z.string().describe("Raw packet bytes in hex; spaces and 0x are allowed"),
     }),
@@ -148,6 +174,17 @@ function buildAction(protocol: Protocol, action: Action): Buffer {
         }
         case "speed":
             return protocol.speed(action.value)
+        case "mic":
+            return protocol.mic(action.state)
+        case "mic_sensitivity":
+            return protocol.micSensitivity(action.percent)
+        case "mic_effect": {
+            const wanted = action.name ?? action.index
+            if (wanted === undefined) {
+                throw new Error("mic_effect: pass either name (see micModes in ble_effects) or index 128-135")
+            }
+            return protocol.micEffect(wanted)
+        }
         case "raw":
             return parseHexPacket(action.hex)
     }
@@ -235,7 +272,9 @@ export function registerTools(server: McpServer, led: BleLed): void {
                 "List the effects the strip supports, by name and index, for the detected (or given) model. " +
                 "The catalog is static data from the controller family — the strip itself cannot report it over BLE. " +
                 "Read-only: does not connect. Use it before picking an effect for ble_apply " +
-                "({'type':'effect','name':'blink_red'} or {'type':'effect','index':150}).",
+                "({'type':'effect','name':'blink_red'} or {'type':'effect','index':150}). " +
+                "Also lists micModes (microphone reaction modes of the controller's own mic, " +
+                "applied via {'type':'mic_effect','name':'mic_rhythm'} after {'type':'mic','state':'on'}).",
             inputSchema: {
                 device: deviceParam,
                 model: z.string().optional().describe("Model from ble_list_models, to override detection"),
@@ -268,6 +307,8 @@ export function registerTools(server: McpServer, led: BleLed): void {
                     effectSpeedRange: protocol.effectSpeedRange,
                     count: protocol.effects.length,
                     effects: protocol.effects.map((effect) => ({ index: effect.index, name: effect.name })),
+                    micModes: MIC_EFFECT_MODES.map((mode) => ({ index: mode.index, name: mode.name })),
+                    micSensitivityRange: { min: 0, max: 100 },
                 },
                 `${protocol.name}: ${protocol.effects.length} named effects (class ${protocol.effectsClass ?? "?"}).`,
             )

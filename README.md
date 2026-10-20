@@ -95,6 +95,9 @@ The same works from an agent: `ble_scan` → `ble_add_device` → the control to
 | `kelvin <K>` | color temperature (1800 K warm … 7000 K cool) |
 | `effect <name\|n> [speed] [brightness]` | effect by name (`blink_red`) or index (`150`) |
 | `speed <v>` | speed of the current effect |
+| `mic <on\|off>` | the controller's own microphone (music reaction runs on the strip) |
+| `mic-sensitivity <0-100>` | microphone sensitivity |
+| `mic-effect <name\|n>` | microphone reaction mode (`mic_rhythm`, `129`, …) |
 | `effects` | list the strip's effects by name and index (no connection needed) |
 | `raw <hex>` | send an arbitrary packet, for debugging |
 | `watch [-d seconds]` | listen to the notify channel |
@@ -207,7 +210,7 @@ The connection is released the moment the call returns, so a second tool call wo
 }
 ```
 
-One `actions[]` entry — one packet. Action types: `power` (`state: on|off`), `color` (`color: "#rrggbb"`), `brightness` (`percent`), `white` (`percent`), `color_temperature` (`kelvin`), `effect` (`index` **or** `name` from the ble_effects catalog), `speed` (`value`), `raw` (`hex: "7e 04 04 f0 00 01 ff 00 ef"`). Order matters: for conflicting modes the last one wins, and a `speed`/`brightness` that belongs to an effect must come **before** the effect itself. The mandatory settle delay is honoured after every packet, in order.
+One `actions[]` entry — one packet. Action types: `power` (`state: on|off`), `color` (`color: "#rrggbb"`), `brightness` (`percent`), `white` (`percent`), `color_temperature` (`kelvin`), `effect` (`index` **or** `name` from the ble_effects catalog), `speed` (`value`), `mic` (`state: on|off`), `mic_sensitivity` (`percent` 0-100), `mic_effect` (`index` 128-135 **or** `name` from `micModes`), `raw` (`hex: "7e 04 04 f0 00 01 ff 00 ef"`). Order matters: for conflicting modes the last one wins, and a `speed`/`brightness` that belongs to an effect must come **before** the effect itself. The mandatory settle delay is honoured after every packet, in order.
 
 An action the detected model does not support is **skipped and reported** while the rest are still applied — the answer lists `applied` and `skipped` per index. The same applies to an effect name the catalog does not know: it is skipped with an error listing the known names, never sent blindly.
 
@@ -302,6 +305,27 @@ The controller is **write-only**: over Bluetooth it never reports which effects 
 | `EFFECTS_DMRRBA` | DMRRBA-007 | 9 |
 
 An agent (or a human) browses the catalog with the `ble_effects` tool / `effects` command — no internet needed — and then sets an effect **by name** (`{"type":"effect","name":"blink_red"}`) or by index. A name the catalog does not know is skipped and reported, never sent blindly. Effect **speed** is a separate command with its own per-model range (0–255 by default, 0–183 for ELK-BLEDOB), applied by the `speed` action / `speed` command — and, like brightness, it must come **before** the effect in the same batch.
+
+#### Microphone (music) modes
+
+The controller has its own microphone and analyzes sound **on the strip itself** — no audio is streamed over Bluetooth, so switching a music mode is a one-shot command and it keeps running after the connection is released (same "release after every command" design as everywhere else).
+
+The modes are numbered `0x80-0x87` (128-135) and live in `micModes` of `ble_effects` / in the `effects` command output (`mic_energic`, `mic_rhythm`, `mic_spectrum`, `mic_rolling`, … — names pinned from elkbledom). A music session is one batch:
+
+```json
+{"actions": [
+  {"type": "mic", "state": "on"},
+  {"type": "mic_sensitivity", "percent": 60},
+  {"type": "mic_effect", "name": "mic_rhythm"}
+]}
+```
+
+Details worth knowing:
+
+- Indexes 128-135 passed to `effect` are **routed to the microphone packet automatically**: the controller ignores them in the generic effect packet (verified live on ELK-BLEDDM — it kept the previous color) and only accepts the dedicated mic packet shape (`7e 05 03 .. 04 ..`).
+- Sensitivity matters: too high and the mic reacts to ambient noise (the "random flickering" symptom); too low and it does not react at all. Range 0-100, default in the phone app is 50.
+- Mic commands (`mic`, `mic_sensitivity`, `mic_effect`) are sent as the hardcoded packets of the upstream integration — independent of the model registry.
+- Not supported: the second mode of the phone apps — "phone microphone" (the phone streams its own mic audio to the strip). That is a continuous BLE stream, not this protocol's one-shot commands.
 
 ## Development
 

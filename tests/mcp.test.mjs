@@ -134,6 +134,69 @@ test("ble_apply sets an effect by name and reports an unknown one", async () => 
     await led.close()
 })
 
+test("ble_apply drives the microphone: on, sensitivity, mode", async () => {
+    const fake = createFakeBle({ modelName: "ELK-BLEDDM" })
+    const led = new BleLed({
+        warmMs: 0,
+        target: { address: ADDRESS, model: "ELK-BLEDDM" },
+        createBluetooth: fake.createBluetooth,
+    })
+    const client = await connectClient(led)
+
+    const response = await client.callTool({
+        name: "ble_apply",
+        arguments: {
+            actions: [
+                { type: "power", state: "on" },
+                { type: "mic", state: "on" },
+                { type: "mic_sensitivity", percent: 80 },
+                { type: "mic_effect", name: "mic_rhythm" },
+            ],
+        },
+    })
+
+    const payload = response.structuredContent
+    assert.equal(payload.applied.length, 4)
+    assert.equal(payload.skipped.length, 0)
+    assert.equal(payload.applied[1].packet, "7e 04 07 01 ff ff ff 00 ef", "enable_mic")
+    assert.equal(payload.applied[2].packet, "7e 04 06 50 ff ff ff 00 ef", "mic_sensitivity 80")
+    assert.equal(payload.applied[3].packet, "7e 05 03 81 04 ff ff 00 ef", "mic_rhythm = 0x81")
+
+    await client.close()
+    await led.close()
+})
+
+test("ble_apply an effect in the mic range uses the mic packet automatically", async () => {
+    const fake = createFakeBle({ modelName: "ELK-BLEDDM" })
+    const led = new BleLed({
+        warmMs: 0,
+        target: { address: ADDRESS, model: "ELK-BLEDDM" },
+        createBluetooth: fake.createBluetooth,
+    })
+    const client = await connectClient(led)
+
+    const response = await client.callTool({
+        name: "ble_apply",
+        arguments: { actions: [{ type: "effect", index: 128 }] },
+    })
+
+    const payload = response.structuredContent
+    assert.equal(payload.applied.length, 1)
+    // byte1=05/byte4=04 mic shape, NOT the generic effect template.
+    assert.equal(payload.applied[0].packet, "7e 05 03 80 04 ff ff 00 ef")
+
+    // An out-of-range mic mode is rejected by the schema (128-135): the call
+    // fails as a whole, nothing reaches the strip.
+    const bad = await client.callTool({
+        name: "ble_apply",
+        arguments: { actions: [{ type: "mic_effect", index: 140 }] },
+    })
+    assert.equal(bad.isError, true, "index 140 must fail schema validation")
+
+    await client.close()
+    await led.close()
+})
+
 test("ble_effects lists the catalog of the detected model without connecting", async () => {
     const fake = createFakeBle({ modelName: "ELK-BLEDDM" })
     const led = new BleLed({
@@ -154,6 +217,11 @@ test("ble_effects lists the catalog of the detected model without connecting", a
         payload.effects.some((effect) => effect.name === "blink_red" && effect.index === 150),
         "the catalog must contain blink_red=150",
     )
+    assert.ok(
+        payload.micModes.some((mode) => mode.name === "mic_rhythm" && mode.index === 129),
+        "micModes must list the controller-mic reaction modes",
+    )
+    assert.deepEqual(payload.micSensitivityRange, { min: 0, max: 100 })
     assert.equal(fake.log.connects, 0, "browsing the catalog must not touch the device")
 
     await client.close()
