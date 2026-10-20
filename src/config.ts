@@ -1,8 +1,8 @@
 /**
  * Configuration: named devices.
  *
- * Stored in ~/.config/ble-mcp/config.json (the directory can be overridden with
- * BLE_MCP_CONFIG_DIR). There is exactly one format — a map of named devices plus
+ * Stored in ~/.config/ledstrip-mcp/config.json (the directory can be overridden with
+ * LEDSTRIP_MCP_CONFIG_DIR). There is exactly one format — a map of named devices plus
  * an optional default:
  *
  *       {
@@ -48,9 +48,9 @@ export interface Target {
 }
 
 export function configDir(): string {
-    if (process.env.BLE_MCP_CONFIG_DIR) return process.env.BLE_MCP_CONFIG_DIR
+    if (process.env.LEDSTRIP_MCP_CONFIG_DIR) return process.env.LEDSTRIP_MCP_CONFIG_DIR
     const base = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")
-    return join(base, "ble-mcp")
+    return join(base, "ledstrip-mcp")
 }
 
 export function configPath(): string {
@@ -150,14 +150,14 @@ export function setDefaultDevice(alias: string): BleConfig {
  * Effective target, in priority order:
  *   explicit arguments → named device (`device` alias) → environment → error.
  *
- * A `device` alias can come from the caller, from BLE_MCP_DEVICE, or from the
+ * A `device` alias can come from the caller, from LEDSTRIP_MCP_DEVICE, or from the
  * config's `default`. An unknown alias is an error, so a typo never silently
  * controls the wrong strip.
  */
 export function resolveTarget(overrides: Partial<Target> = {}): Target {
     const config = loadConfig()
     const env = process.env
-    const alias = overrides.device ?? env.BLE_MCP_DEVICE ?? config.default
+    const alias = overrides.device ?? env.LEDSTRIP_MCP_DEVICE ?? config.default
     const entry = alias ? config.devices?.[alias] : undefined
 
     if (alias && !entry) {
@@ -168,9 +168,9 @@ export function resolveTarget(overrides: Partial<Target> = {}): Target {
         )
     }
 
-    const address = overrides.address ?? entry?.address ?? env.BLE_MCP_ADDRESS
-    const name = overrides.name ?? entry?.name ?? env.BLE_MCP_NAME ?? ""
-    const model = overrides.model ?? entry?.model ?? env.BLE_MCP_MODEL
+    const address = overrides.address ?? entry?.address ?? env.LEDSTRIP_MCP_ADDRESS
+    const name = overrides.name ?? entry?.name ?? env.LEDSTRIP_MCP_NAME ?? ""
+    const model = overrides.model ?? entry?.model ?? env.LEDSTRIP_MCP_MODEL
 
     if (!address && !name) {
         const known = Object.keys(config.devices ?? {})

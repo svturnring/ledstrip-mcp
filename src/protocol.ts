@@ -225,7 +225,7 @@ export class Protocol {
     static forDevice(deviceName?: string, override?: string): Protocol {
         const byOverride = findModel(override)
         if (override && !byOverride) {
-            throw new Error(`model "${override}" is not in the registry, see: ble-mcp models`)
+            throw new Error(`model "${override}" is not in the registry, see: ledstrip-mcp models`)
         }
         return new Protocol(byOverride ?? findModel(deviceName) ?? (findModel(DEFAULT_MODEL_NAME) as ModelSpec))
     }

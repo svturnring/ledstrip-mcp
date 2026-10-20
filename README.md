@@ -1,4 +1,4 @@
-# ble-mcp
+# ledstrip-mcp
 
 MCP server and CLI for BLE LED-strip controllers of the **ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK** family. Written in TypeScript, talks to BlueZ over D-Bus, **no native builds**.
 
@@ -17,25 +17,43 @@ No extra privileges are needed: BlueZ allows regular users to call `org.bluez` b
 
 ## Installation
 
+Install straight from GitHub (the repo is public; `npm` clones it, runs the TypeScript build via the `prepare` script and links the `ledstrip-mcp` command — no separate build step):
+
 ```sh
-cd ~/dev/apps/ble-mcp
-npm install
-npm run build
+npm install -g github:svturnring/ledstrip-mcp
 ```
 
-A launcher is installed at `~/.local/bin/ble-mcp` and points to `dist/index.js`, so after building the command is available as `ble-mcp` from anywhere.
+Verify:
+
+```sh
+ledstrip-mcp --version
+```
+
+To upgrade to a newer commit: run the same command again (or add `@<tag>` once release tags are used).
+
+<details>
+<summary>Development install (from a local clone)</summary>
+
+```sh
+git clone https://github.com/svturnring/ledstrip-mcp.git
+cd ledstrip-mcp
+npm install          # prepare script builds dist/ automatically
+npm link             # or: npm install -g .
+```
+
+</details>
 
 ## Quick start
 
 ```sh
-ble-mcp scan                                              # what is in the air at all
-ble-mcp attach living-room AA:BB:CC:DD:EE:01 --default    # bind a found strip under a name
-ble-mcp on                                                # the default strip
-ble-mcp color '#ff8800'
-ble-mcp brightness 40
-ble-mcp effects                                           # what this strip can do, by name
-ble-mcp effect blink_red 128 70                           # effect by name, speed, brightness — as one series
-ble-mcp off
+ledstrip-mcp scan                                              # what is in the air at all
+ledstrip-mcp attach living-room AA:BB:CC:DD:EE:01 --default    # bind a found strip under a name
+ledstrip-mcp on                                                # the default strip
+ledstrip-mcp color '#ff8800'
+ledstrip-mcp brightness 40
+ledstrip-mcp effects                                           # what this strip can do, by name
+ledstrip-mcp effect blink_red 128 70                           # effect by name, speed, brightness — as one series
+ledstrip-mcp off
 ```
 
 The first scan is needed to learn the MAC address. The address is stored in the config, and afterwards connections go straight to it — much faster than searching by name.
@@ -45,10 +63,10 @@ The first scan is needed to learn the MAC address. The address is stored in the 
 Several strips can be kept side by side. A strip is identified by a **name (alias)** — for example by room — which is just a pointer to a MAC address in the config. Discover the devices, then attach them:
 
 ```sh
-ble-mcp scan
-ble-mcp attach living-room AA:BB:CC:DD:EE:01 --default
-ble-mcp attach bedroom     AA:BB:CC:DD:EE:02
-ble-mcp devices
+ledstrip-mcp scan
+ledstrip-mcp attach living-room AA:BB:CC:DD:EE:01 --default
+ledstrip-mcp attach bedroom     AA:BB:CC:DD:EE:02
+ledstrip-mcp devices
 ```
 
 ```text
@@ -59,9 +77,9 @@ ble-mcp devices
 Now any command takes `-D/--device <alias>`; without it the default strip is used:
 
 ```sh
-ble-mcp -D bedroom color red
-ble-mcp -D bedroom brightness 20
-ble-mcp -D living-room white 80
+ledstrip-mcp -D bedroom color red
+ledstrip-mcp -D bedroom brightness 20
+ledstrip-mcp -D living-room white 80
 ```
 
 Registry management:
@@ -76,7 +94,7 @@ Registry management:
 If the MAC is not known yet, bind by advertising name and the address is learned and saved on first use:
 
 ```sh
-ble-mcp attach bedroom --dev-name ELK-BLEDOM
+ledstrip-mcp attach bedroom --dev-name ELK-BLEDOM
 ```
 
 The same works from an agent: `ble_scan` → `ble_add_device` → the control tools take a `device` argument (see [MCP tools](#mcp-tools)). Each strip has its own connection, so a warm MCP server can hold several strips open at once.
@@ -113,10 +131,10 @@ Global options: `-a/--address`, `-n/--name`, `-m/--model`, `-D/--device <alias>`
 Examples:
 
 ```sh
-ble-mcp scan -d 15 --json | jq '.devices[] | select(.likely)'
-ble-mcp -D bedroom color '255,136,0'
-ble-mcp -a AA:BB:CC:DD:EE:01 -n ELK-BLEDDM color red
-ble-mcp --warm 60000 serve -t http --port 8765
+ledstrip-mcp scan -d 15 --json | jq '.devices[] | select(.likely)'
+ledstrip-mcp -D bedroom color '255,136,0'
+ledstrip-mcp -a AA:BB:CC:DD:EE:01 -n ELK-BLEDDM color red
+ledstrip-mcp --warm 60000 serve -t http --port 8765
 ```
 
 ## Connecting to MCP
@@ -131,7 +149,7 @@ opencode (`~/.config/opencode/opencode.json`):
         "servers": {
             "ble": {
                 "type": "local",
-                "command": ["ble-mcp", "serve", "-t", "stdio"],
+                "command": ["ledstrip-mcp", "serve", "-t", "stdio"],
                 "disabled": false
             }
         }
@@ -139,22 +157,22 @@ opencode (`~/.config/opencode/opencode.json`):
 }
 ```
 
-If `ble-mcp` is not on the client's `PATH`, use an absolute path:
+If `ledstrip-mcp` is not on the client's `PATH`, use an absolute path:
 
 ```json
-"command": ["node", "/home/svtrn/dev/apps/ble-mcp/dist/index.js", "serve", "-t", "stdio"]
+"command": ["node", "/home/svtrn/dev/apps/ledstrip-mcp/dist/index.js", "serve", "-t", "stdio"]
 ```
 
 Claude Desktop and other clients using the `mcpServers` shape — the same:
 
 ```json
-{ "mcpServers": { "ble": { "command": "ble-mcp", "args": ["serve", "-t", "stdio"] } } }
+{ "mcpServers": { "ble": { "command": "ledstrip-mcp", "args": ["serve", "-t", "stdio"] } } }
 ```
 
 ### 2. HTTP — when the agent runs elsewhere (container, another machine)
 
 ```sh
-ble-mcp serve -t http --host 127.0.0.1 --port 8765 --path /mcp
+ledstrip-mcp serve -t http --host 127.0.0.1 --port 8765 --path /mcp
 ```
 
 - `POST /mcp` — JSON-RPC (streamable HTTP). The server replies with an `Mcp-Session-Id` header, and the client must send it on every following request;
@@ -220,7 +238,7 @@ A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` �
 
 Priority: **explicit arguments (CLI flags / tool args) → named device alias → environment variables → error**.
 
-File: `~/.config/ble-mcp/config.json` (the directory can be overridden with `BLE_MCP_CONFIG_DIR`). There is a single format: a map of named devices plus an optional default. This is exactly what `attach` / `ble_add_device` write:
+File: `~/.config/ledstrip-mcp/config.json` (the directory can be overridden with `LEDSTRIP_MCP_CONFIG_DIR`). There is a single format: a map of named devices plus an optional default. This is exactly what `attach` / `ble_add_device` write:
 
 ```json
 {
@@ -232,7 +250,7 @@ File: `~/.config/ble-mcp/config.json` (the directory can be overridden with `BLE
 }
 ```
 
-Environment variables: `BLE_MCP_ADDRESS`, `BLE_MCP_NAME`, `BLE_MCP_MODEL`, `BLE_MCP_DEVICE` (alias of the default strip), `BLE_MCP_VERBOSE=1`.
+Environment variables: `LEDSTRIP_MCP_ADDRESS`, `LEDSTRIP_MCP_NAME`, `LEDSTRIP_MCP_MODEL`, `LEDSTRIP_MCP_DEVICE` (alias of the default strip), `LEDSTRIP_MCP_VERBOSE=1`.
 
 `address` speeds everything up: connection goes straight to the device instead of searching by name. `model` is only needed when auto-detection gets it wrong.
 
@@ -338,7 +356,7 @@ npm run format      # prettier
 npm run check       # typecheck + tests
 ```
 
-Tests need no hardware: packet building is checked against reference bytes captured from a real ELK-BLEDDM, plus input parsers, notification decoding, and the transport/MCP layers against a fake BLE session — the invariants there are that a batch of commands shares one connection and that the channel is released when the call returns. Live verification is done with `ble-mcp on/off/color` — since the controller reports no state, "did it go through" can only be confirmed by looking at the strip.
+Tests need no hardware: packet building is checked against reference bytes captured from a real ELK-BLEDDM, plus input parsers, notification decoding, and the transport/MCP layers against a fake BLE session — the invariants there are that a batch of commands shares one connection and that the channel is released when the call returns. Live verification is done with `ledstrip-mcp on/off/color` — since the controller reports no state, "did it go through" can only be confirmed by looking at the strip.
 
 ## Gotchas
 

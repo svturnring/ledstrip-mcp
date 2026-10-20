@@ -3,8 +3,8 @@
  *
  * Cover the named-device registry that powers multi-strip control: aliases,
  * the default device, priority of explicit arguments over the config, and the
- * name-based device classifier. Each test points BLE_MCP_CONFIG_DIR at a fresh
- * temp directory, so nothing touches the real ~/.config/ble-mcp.
+ * name-based device classifier. Each test points LEDSTRIP_MCP_CONFIG_DIR at a fresh
+ * temp directory, so nothing touches the real ~/.config/ledstrip-mcp.
  */
 
 import assert from "node:assert/strict"
@@ -14,10 +14,10 @@ import { join } from "node:path"
 import { test } from "node:test"
 
 // Must be set before the first config call. configDir() reads the env on every
-// call, so a per-process temp dir is enough. Ambient BLE_MCP_* is cleared so the
+// call, so a per-process temp dir is enough. Ambient LEDSTRIP_MCP_* is cleared so the
 // tests only see what they seed.
-process.env.BLE_MCP_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ble-mcp-test-"))
-for (const key of ["BLE_MCP_ADDRESS", "BLE_MCP_NAME", "BLE_MCP_MODEL", "BLE_MCP_DEVICE"]) {
+process.env.LEDSTRIP_MCP_CONFIG_DIR = mkdtempSync(join(tmpdir(), "ledstrip-mcp-test-"))
+for (const key of ["LEDSTRIP_MCP_ADDRESS", "LEDSTRIP_MCP_NAME", "LEDSTRIP_MCP_MODEL", "LEDSTRIP_MCP_DEVICE"]) {
     delete process.env[key]
 }
 
@@ -27,7 +27,7 @@ const { classifyDeviceName } = await import("../dist/protocol.js")
 
 /** Replace the whole config with the given object. */
 function seed(config) {
-    mkdirSync(process.env.BLE_MCP_CONFIG_DIR, { recursive: true })
+    mkdirSync(process.env.LEDSTRIP_MCP_CONFIG_DIR, { recursive: true })
     writeFileSync(configPath(), `${JSON.stringify(config, null, 2)}\n`, "utf8")
 }
 

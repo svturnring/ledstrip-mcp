@@ -4,7 +4,7 @@
  *
  * Two transports:
  *   - stdio — how opencode / Claude Desktop / any local client launches it;
- *   - streamable HTTP — to connect over the network (`ble-mcp serve -t http`).
+ *   - streamable HTTP — to connect over the network (`ledstrip-mcp serve -t http`).
  *
  * IMPORTANT about stdio: stdout is taken by JSON-RPC, so all output goes to
  * stderr (see log.ts) and console.log is forcibly redirected to stderr.
@@ -522,7 +522,7 @@ export function registerTools(server: McpServer, led: BleLed): void {
 
 /** A fresh server instance per HTTP session. */
 function createMcpServer(led: BleLed): McpServer {
-    const server = new McpServer({ name: "ble-mcp", version: VERSION })
+    const server = new McpServer({ name: "ledstrip-mcp", version: VERSION })
     registerTools(server, led)
     return server
 }
@@ -590,7 +590,7 @@ export async function startHttpServer(led: BleLed, options: HttpServerOptions): 
             const url = new URL(req.url ?? "/", `http://${req.headers.host ?? `${options.host}:${options.port}`}`)
 
             if (url.pathname === "/health") {
-                sendJson(res, 200, { status: "ok", name: "ble-mcp", version: VERSION, transport: "http" })
+                sendJson(res, 200, { status: "ok", name: "ledstrip-mcp", version: VERSION, transport: "http" })
                 return
             }
             if (url.pathname !== options.path) {

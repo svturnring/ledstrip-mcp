@@ -1,14 +1,22 @@
 {
-    "name": "ble-mcp",
-    "version": "0.4.1",
+    "name": "ledstrip-mcp",
+    "version": "0.5.0",
     "description": "MCP server and CLI for BLE LED strips ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK (BlueZ, no native builds)",
     "type": "module",
     "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/svturnring/ledstrip-mcp.git"
+    },
+    "homepage": "https://github.com/svturnring/ledstrip-mcp#readme",
+    "bugs": {
+        "url": "https://github.com/svturnring/ledstrip-mcp/issues"
+    },
     "engines": {
         "node": ">=20"
     },
     "bin": {
-        "ble-mcp": "dist/index.js"
+        "ledstrip-mcp": "dist/index.js"
     },
     "main": "dist/index.js",
     "files": [
@@ -31,6 +39,7 @@
     ],
     "scripts": {
         "build": "tsc",
+        "prepare": "npm run build",
         "typecheck": "tsc --noEmit",
         "start": "node dist/index.js",
         "dev": "tsc --watch",

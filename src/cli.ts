@@ -1,5 +1,5 @@
 /**
- * `ble-mcp` CLI interface.
+ * `ledstrip-mcp` CLI interface.
  *
  * Works independently of any agent environment: the same operations available
  * as MCP tools can be invoked by hand from a terminal.
@@ -91,7 +91,7 @@ export function createProgram(): Command {
     const program = new Command()
 
     program
-        .name("ble-mcp")
+        .name("ledstrip-mcp")
         .description("Control BLE LED strips ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK")
         .version(VERSION)
         .option("-a, --address <mac>", "MAC address of the strip (otherwise search by name)")
@@ -281,7 +281,7 @@ export function createProgram(): Command {
         "turn on an effect by name or number (see 'effects'; 128-135 — microphone modes)",
         ([value, speed, brightness]) => {
             const wanted = value ?? ""
-            if (!wanted) throw new Error("effect: pass an effect name or number (see: ble-mcp effects)")
+            if (!wanted) throw new Error("effect: pass an effect name or number (see: ledstrip-mcp effects)")
             const speedValue = speed === undefined ? undefined : Number(speed)
             const brightnessValue = brightness === undefined ? undefined : toPercent(brightness, "brightness")
             return (protocol) => {
@@ -341,7 +341,7 @@ export function createProgram(): Command {
         "microphone reaction mode by name or number (see 'effects'; e.g. soft or 129)",
         ([value]) => {
             const wanted = value ?? ""
-            if (!wanted) throw new Error("mic-effect: pass a mode name or number (see: ble-mcp effects)")
+            if (!wanted) throw new Error("mic-effect: pass a mode name or number (see: ledstrip-mcp effects)")
             return (protocol) => protocol.micEffect(wanted)
         },
         (result) => `Mic mode on (${result.model}). Sent: ${result.sent.join(" | ")}`,
@@ -480,8 +480,8 @@ export function createProgram(): Command {
                 if (aliases.length === 0) {
                     return (
                         "No saved strips.\n" +
-                        "Find the address first:  ble-mcp scan\n" +
-                        "Then attach it:          ble-mcp attach <name> <MAC>   (for example: attach bedroom AA:BB:CC:DD:EE:FF)"
+                        "Find the address first:  ledstrip-mcp scan\n" +
+                        "Then attach it:          ledstrip-mcp attach <name> <MAC>   (for example: attach bedroom AA:BB:CC:DD:EE:FF)"
                     )
                 }
                 return aliases

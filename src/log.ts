@@ -6,7 +6,7 @@
  * console.log and everything here is written to stderr.
  */
 
-let verboseEnabled = /^(1|true|yes)$/i.test(process.env.BLE_MCP_VERBOSE ?? "")
+let verboseEnabled = /^(1|true|yes)$/i.test(process.env.LEDSTRIP_MCP_VERBOSE ?? "")
 
 export function setVerbose(value: boolean): void {
     verboseEnabled = value
@@ -25,7 +25,7 @@ export function log(message: string): void {
     write("", message)
 }
 
-/** Details — only with --verbose / BLE_MCP_VERBOSE=1. */
+/** Details — only with --verbose / LEDSTRIP_MCP_VERBOSE=1. */
 export function debug(message: string): void {
     if (verboseEnabled) write("[debug] ", message)
 }

@@ -22,7 +22,7 @@ const ADDRESS = "AA:BB:CC:DD:EE:01"
 
 /** Wire an McpServer with the real tool set to a real client over an in-memory pair. */
 async function connectClient(led) {
-    const server = new McpServer({ name: "ble-mcp-test", version: "0" })
+    const server = new McpServer({ name: "ledstrip-mcp-test", version: "0" })
     registerTools(server, led)
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     const client = new Client({ name: "test-client", version: "0" })
