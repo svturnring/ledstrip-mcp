@@ -97,7 +97,7 @@ The same works from an agent: `ble_scan` → `ble_add_device` → the control to
 | `speed <v>` | speed of the current effect |
 | `mic <on\|off>` | the controller's own microphone (music reaction runs on the strip) |
 | `mic-sensitivity <0-100>` | microphone sensitivity |
-| `mic-effect <name\|n>` | microphone reaction mode (`mic_rhythm`, `129`, …) |
+| `mic-effect <name\|n>` | microphone reaction mode (`soft`, `129`, …) |
 | `effects` | list the strip's effects by name and index (no connection needed) |
 | `raw <hex>` | send an arbitrary packet, for debugging |
 | `watch [-d seconds]` | listen to the notify channel |
@@ -310,13 +310,13 @@ An agent (or a human) browses the catalog with the `ble_effects` tool / `effects
 
 The controller has its own microphone and analyzes sound **on the strip itself** — no audio is streamed over Bluetooth, so switching a music mode is a one-shot command and it keeps running after the connection is released (same "release after every command" design as everywhere else).
 
-The modes are numbered `0x80-0x87` (128-135) and live in `micModes` of `ble_effects` / in the `effects` command output (`mic_energic`, `mic_rhythm`, `mic_spectrum`, `mic_rolling`, … — names pinned from elkbledom). A music session is one batch:
+The modes are numbered `0x80-0x87` (128-135) and live in `micModes` of `ble_effects` / in the `effects` command output. The four named modes are the English names of the phone app (LotusLanternX), mapped empirically on a physical strip: `classic` (0x80), `soft` (0x81), `dynamic` (0x82), `disco` (0x83); `mic_effect_4..7` (0x84-0x87) are additional modes with no fixed name. The elkbledom upstream names (`mic_energic`, `mic_rhythm`, …) are kept as aliases. A music session is one batch:
 
 ```json
 {"actions": [
   {"type": "mic", "state": "on"},
   {"type": "mic_sensitivity", "percent": 60},
-  {"type": "mic_effect", "name": "mic_rhythm"}
+  {"type": "mic_effect", "name": "soft"}
 ]}
 ```
 

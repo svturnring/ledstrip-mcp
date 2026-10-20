@@ -1,6 +1,6 @@
 {
     "name": "ble-mcp",
-    "version": "0.4.0",
+    "version": "0.4.1",
     "description": "MCP server and CLI for BLE LED strips ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK (BlueZ, no native builds)",
     "type": "module",
     "license": "MIT",

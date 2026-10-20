@@ -338,7 +338,7 @@ export function createProgram(): Command {
 
     sendCommand(
         "mic-effect",
-        "microphone reaction mode by name or number (see 'effects'; e.g. mic_rhythm or 129)",
+        "microphone reaction mode by name or number (see 'effects'; e.g. soft or 129)",
         ([value]) => {
             const wanted = value ?? ""
             if (!wanted) throw new Error("mic-effect: pass a mode name or number (see: ble-mcp effects)")
@@ -443,7 +443,11 @@ export function createProgram(): Command {
                 effectSpeedRange: protocol.effectSpeedRange,
                 count: protocol.effects.length,
                 effects: protocol.effects.map((effect) => ({ index: effect.index, name: effect.name })),
-                micModes: MIC_EFFECT_MODES.map((mode) => ({ index: mode.index, name: mode.name })),
+                micModes: MIC_EFFECT_MODES.map((mode) => ({
+                    index: mode.index,
+                    name: mode.name,
+                    aliases: mode.aliases ?? [],
+                })),
                 micSensitivityRange: { min: 0, max: 100 },
             }
             print(opts, payload, (data) => {
@@ -455,7 +459,10 @@ export function createProgram(): Command {
                 for (const effect of data.effects) lines.push(`  ${String(effect.index).padStart(4)}  ${effect.name}`)
                 if (data.supportsEffects) {
                     lines.push("microphone reaction modes (controller's own mic; 'mic on' first):")
-                    for (const mode of data.micModes) lines.push(`  ${String(mode.index).padStart(4)}  ${mode.name}`)
+                    for (const mode of data.micModes) {
+                        const aliases = mode.aliases.length ? `  (${mode.aliases.join(", ")})` : ""
+                        lines.push(`  ${String(mode.index).padStart(4)}  ${mode.name}${aliases}`)
+                    }
                 }
                 return lines.join("\n")
             })

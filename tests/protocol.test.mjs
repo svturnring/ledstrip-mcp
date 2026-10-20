@@ -167,7 +167,7 @@ test("resolveEffect accepts numbers, numeric strings and names", () => {
     assert.equal(protocol.resolveEffect("Blink Red"), 150)
     assert.equal(protocol.resolveEffect("blink-red"), 150)
     // An unknown name is an explicit error listing what IS known.
-    assert.throws(() => protocol.resolveEffect("disco"), /unknown effect "disco".*blink_red/s)
+    assert.throws(() => protocol.resolveEffect("no-such-effect"), /unknown effect "no-such-effect".*blink_red/s)
 })
 
 test("an effect by name builds the same packet as by number", () => {
@@ -195,10 +195,36 @@ test("microphone commands match the upstream packets", () => {
     // Sensitivity is clamped to the controller's 0-100 scale.
     assert.equal(hex(protocol.micSensitivity(250)), "7e 04 06 64 ff ff ff 00 ef")
     assert.equal(hex(protocol.micEffect(0x80)), "7e 05 03 80 04 ff ff 00 ef")
+    // Canonical (phone-app English) names map to the confirmed modes.
+    assert.equal(hex(protocol.micEffect("soft")), "7e 05 03 81 04 ff ff 00 ef")
+    assert.equal(hex(protocol.micEffect("disco")), "7e 05 03 83 04 ff ff 00 ef")
+    // Upstream aliases still resolve to the same packet.
     assert.equal(hex(protocol.micEffect("mic_rhythm")), "7e 05 03 81 04 ff ff 00 ef")
+    assert.equal(hex(protocol.micEffect("mic_rolling")), "7e 05 03 83 04 ff ff 00 ef")
     // Out of range is an explicit error, not a clamped guess.
     assert.throws(() => protocol.micEffect(0x88), /must be 128-135/)
     assert.throws(() => protocol.micEffect("no-such-mode"), /unknown mic mode/)
+})
+
+test("the phone-app mic names are what the catalog advertises", () => {
+    const protocol = Protocol.forDevice("ELK-BLEDDM")
+    // Mapped empirically on a physical ELK-BLEDDM strip, confirmed by the user:
+    //   0x80 classic, 0x81 soft, 0x82 dynamic, 0x83 disco.
+    const byName = Object.fromEntries(protocol.micModes.map((mode) => [mode.name, mode.index]))
+    assert.deepEqual(byName, {
+        classic: 0x80,
+        soft: 0x81,
+        dynamic: 0x82,
+        disco: 0x83,
+        mic_effect_4: 0x84,
+        mic_effect_5: 0x85,
+        mic_effect_6: 0x86,
+        mic_effect_7: 0x87,
+    })
+    for (const mode of protocol.micModes) {
+        assert.equal(protocol.resolveMicEffect(mode.name), mode.index)
+        for (const alias of mode.aliases ?? []) assert.equal(protocol.resolveMicEffect(alias), mode.index)
+    }
 })
 
 test("effect 128-135 routes to the mic packet, not the animation-table packet", () => {
@@ -211,5 +237,5 @@ test("effect 128-135 routes to the mic packet, not the animation-table packet", 
     assert.equal(hex(protocol.effect(150)), "7e 00 03 96 03 00 00 00 ef")
     // Mic mode by name resolves through resolveEffect as well.
     assert.equal(protocol.resolveEffect("mic_rhythm"), 129)
-    assert.equal(hex(protocol.effect(protocol.resolveEffect("mic_spectrum"))), hex(protocol.micEffect(0x82)))
+    assert.equal(hex(protocol.effect(protocol.resolveEffect("dynamic"))), hex(protocol.micEffect(0x82)))
 })

@@ -150,7 +150,7 @@ test("ble_apply drives the microphone: on, sensitivity, mode", async () => {
                 { type: "power", state: "on" },
                 { type: "mic", state: "on" },
                 { type: "mic_sensitivity", percent: 80 },
-                { type: "mic_effect", name: "mic_rhythm" },
+                { type: "mic_effect", name: "soft" },
             ],
         },
     })
@@ -160,7 +160,7 @@ test("ble_apply drives the microphone: on, sensitivity, mode", async () => {
     assert.equal(payload.skipped.length, 0)
     assert.equal(payload.applied[1].packet, "7e 04 07 01 ff ff ff 00 ef", "enable_mic")
     assert.equal(payload.applied[2].packet, "7e 04 06 50 ff ff ff 00 ef", "mic_sensitivity 80")
-    assert.equal(payload.applied[3].packet, "7e 05 03 81 04 ff ff 00 ef", "mic_rhythm = 0x81")
+    assert.equal(payload.applied[3].packet, "7e 05 03 81 04 ff ff 00 ef", "soft = 0x81")
 
     await client.close()
     await led.close()
@@ -218,7 +218,7 @@ test("ble_effects lists the catalog of the detected model without connecting", a
         "the catalog must contain blink_red=150",
     )
     assert.ok(
-        payload.micModes.some((mode) => mode.name === "mic_rhythm" && mode.index === 129),
+        payload.micModes.some((mode) => mode.name === "soft" && mode.index === 129),
         "micModes must list the controller-mic reaction modes",
     )
     assert.deepEqual(payload.micSensitivityRange, { min: 0, max: 100 })

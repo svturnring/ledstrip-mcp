@@ -307,7 +307,11 @@ export function registerTools(server: McpServer, led: BleLed): void {
                     effectSpeedRange: protocol.effectSpeedRange,
                     count: protocol.effects.length,
                     effects: protocol.effects.map((effect) => ({ index: effect.index, name: effect.name })),
-                    micModes: MIC_EFFECT_MODES.map((mode) => ({ index: mode.index, name: mode.name })),
+                    micModes: MIC_EFFECT_MODES.map((mode) => ({
+                        index: mode.index,
+                        name: mode.name,
+                        aliases: mode.aliases ?? [],
+                    })),
                     micSensitivityRange: { min: 0, max: 100 },
                 },
                 `${protocol.name}: ${protocol.effects.length} named effects (class ${protocol.effectsClass ?? "?"}).`,

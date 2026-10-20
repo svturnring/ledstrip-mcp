@@ -44,16 +44,33 @@ export { effectsForClass, EFFECT_CLASS_NAMES } from "./effects.js"
  * microphone — no audio is streamed over BLE, so switching a mode is a
  * one-shot command like any other effect.
  *
- * Names and values are pinned from elkbledom's const.py (MIC_EFFECTS enum);
- * the packets are sent hardcoded upstream, not per model. The phone apps
- * (LotusLanternX) expose fewer named modes over the same range — verify
- * against the hardware before trusting any name-to-behavior mapping.
+ * The canonical `name`s below are the English names of the phone app
+ * (LotusLanternX) — mapped empirically on a physical ELK-BLEDDM strip and
+ * confirmed by the user:
+ *
+ *   0x80 classic  — "классический"
+ *   0x81 soft     — "мягкий"
+ *   0x82 dynamic  — "динамический"
+ *   0x83 disco    — "диско"
+ *
+ * `aliases` keep the elkbledom upstream names (const.py MIC_EFFECTS enum),
+ * so references to mic_energic/mic_rhythm/… still resolve. The packets are
+ * sent hardcoded upstream, not per model.
  */
-export const MIC_EFFECT_MODES: readonly EffectDef[] = [
-    { name: "mic_energic", index: 0x80 },
-    { name: "mic_rhythm", index: 0x81 },
-    { name: "mic_spectrum", index: 0x82 },
-    { name: "mic_rolling", index: 0x83 },
+export interface MicModeDef {
+    /** Canonical name (phone-app English name). */
+    name: string
+    /** Value of the effect byte in the mic-effect packet (0x80-0x87). */
+    index: number
+    /** Upstream elkbledom names for the same mode. */
+    aliases?: string[]
+}
+
+export const MIC_EFFECT_MODES: readonly MicModeDef[] = [
+    { name: "classic", index: 0x80, aliases: ["mic_energic"] },
+    { name: "soft", index: 0x81, aliases: ["mic_rhythm"] },
+    { name: "dynamic", index: 0x82, aliases: ["mic_spectrum"] },
+    { name: "disco", index: 0x83, aliases: ["mic_rolling"] },
     { name: "mic_effect_4", index: 0x84 },
     { name: "mic_effect_5", index: 0x85 },
     { name: "mic_effect_6", index: 0x86 },
@@ -324,6 +341,11 @@ export class Protocol {
         return effectsForClass(this.model.effects_class)
     }
 
+    /** Microphone reaction modes (0x80-0x87), with upstream aliases. */
+    get micModes(): readonly MicModeDef[] {
+        return MIC_EFFECT_MODES
+    }
+
     /** The effects class of the model ("EFFECTS", "EFFECTS_STRIPX", ...). */
     get effectsClass(): string | undefined {
         return this.model.effects_class
@@ -367,8 +389,13 @@ export class Protocol {
         const wanted = normalizeEffectName(trimmed)
         const found = this.effects.find((effect) => normalizeEffectName(effect.name) === wanted)
         if (found) return found.index
-        // Mic modes are not in the effect catalogs but are addressable by name too.
-        const micMode = MIC_EFFECT_MODES.find((mode) => normalizeEffectName(mode.name) === wanted)
+        // Mic modes are not in the effect catalogs but are addressable by name
+        // too — by canonical name and by upstream alias.
+        const micMode = MIC_EFFECT_MODES.find(
+            (mode) =>
+                normalizeEffectName(mode.name) === wanted ||
+                (mode.aliases ?? []).some((alias) => normalizeEffectName(alias) === wanted),
+        )
         if (micMode) return micMode.index
         const known = [...this.effects.map((effect) => effect.name), ...MIC_EFFECT_MODES.map((mode) => mode.name)].join(
             ", ",
@@ -381,15 +408,19 @@ export class Protocol {
 
     /**
      * Turn a microphone-mode reference into 0x80-0x87: a number (also accepted
-     * as "128"-style decimal) or a mode name ("mic_rhythm"), matched the same
-     * tolerant way as effect names.
+     * as "128"-style decimal), a canonical app name ("soft") or an upstream
+     * alias ("mic_rhythm"), matched the same tolerant way as effect names.
      */
     resolveMicEffect(value: number | string): number {
         if (typeof value === "number") return Math.round(value)
         const trimmed = value.trim()
         if (/^\d+$/.test(trimmed)) return Number(trimmed)
         const wanted = normalizeEffectName(trimmed)
-        const found = MIC_EFFECT_MODES.find((mode) => normalizeEffectName(mode.name) === wanted)
+        const found = MIC_EFFECT_MODES.find(
+            (mode) =>
+                normalizeEffectName(mode.name) === wanted ||
+                (mode.aliases ?? []).some((alias) => normalizeEffectName(alias) === wanted),
+        )
         if (found) return found.index
         const known = MIC_EFFECT_MODES.map((mode) => mode.name).join(", ")
         throw new Error(`unknown mic mode "${value}". Known modes: ${known}`)
