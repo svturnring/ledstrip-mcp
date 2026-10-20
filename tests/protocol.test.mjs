@@ -134,3 +134,53 @@ test("a model without the command gives a clear error", () => {
     const protocol = Protocol.forDevice("ELK-BTCW")
     assert.throws(() => protocol.effect(1), /does not support the command|has no placeholder/)
 })
+
+test("the effect catalog is known in advance per model", () => {
+    // The strip cannot report its effects over BLE (the controller is
+    // write-only), so the name → index table is static data baked in at build
+    // time — this is what spares the agent a trip to the internet.
+    const bleddm = Protocol.forDevice("ELK-BLEDDM")
+    assert.equal(bleddm.effectsClass, "EFFECTS")
+    assert.equal(bleddm.supportsEffects, true)
+    assert.equal(bleddm.supportsEffectSpeed, true)
+    assert.ok(bleddm.effects.length >= 20, `expected many effects, got ${bleddm.effects.length}`)
+    assert.ok(
+        bleddm.effects.some((effect) => effect.name === "blink_red" && effect.index === 150),
+        "blink_red must be 150 in the EFFECTS class",
+    )
+
+    // Another family, another catalog: MELK-OA21 is EFFECTS_STRIPX with 200+ effects.
+    const stripx = Protocol.forDevice("MELK-OA21")
+    assert.equal(stripx.effectsClass, "EFFECTS_STRIPX")
+    assert.ok(stripx.effects.length > 200, `expected many effects, got ${stripx.effects.length}`)
+    // Its music effects have indexes above 255 — they must not be clamped away.
+    assert.ok(stripx.effectRange.max >= 391)
+    assert.ok(stripx.effects.some((effect) => effect.name === "music_flow_flash" && effect.index === 384))
+})
+
+test("resolveEffect accepts numbers, numeric strings and names", () => {
+    const protocol = Protocol.forDevice("ELK-BLEDDM")
+    assert.equal(protocol.resolveEffect(3), 3)
+    assert.equal(protocol.resolveEffect("3"), 3)
+    assert.equal(protocol.resolveEffect("blink_red"), 150)
+    // Case and separators do not matter: how a human types it vs how the app spells it.
+    assert.equal(protocol.resolveEffect("Blink Red"), 150)
+    assert.equal(protocol.resolveEffect("blink-red"), 150)
+    // An unknown name is an explicit error listing what IS known.
+    assert.throws(() => protocol.resolveEffect("disco"), /unknown effect "disco".*blink_red/s)
+})
+
+test("an effect by name builds the same packet as by number", () => {
+    const protocol = Protocol.forDevice("ELK-BLEDDM")
+    assert.equal(hex(protocol.effect(protocol.resolveEffect("blink_red"))), hex(protocol.effect(150)))
+})
+
+test("the speed range comes from the model", () => {
+    // ELK-BLEDOB declares 0-183; the rest defaults to 0-255.
+    assert.deepEqual(Protocol.forDevice("ELK-BLEDOB").effectSpeedRange, { min: 0, max: 183 })
+    assert.deepEqual(Protocol.forDevice("ELK-BLEDDM").effectSpeedRange, { min: 0, max: 255 })
+    const bleddm = Protocol.forDevice("ELK-BLEDDM")
+    assert.equal(bleddm.speed(200)[3], 200)
+    // Out-of-range speed is clamped, not wrapped.
+    assert.equal(bleddm.speed(9999)[3], 255)
+})

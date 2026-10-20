@@ -1,6 +1,6 @@
 {
     "name": "ble-mcp",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "MCP server and CLI for BLE LED strips ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK (BlueZ, no native builds)",
     "type": "module",
     "license": "MIT",
@@ -35,7 +35,7 @@
         "start": "node dist/index.js",
         "dev": "tsc --watch",
         "test": "npm run build && node --test tests/*.test.mjs",
-        "gen:models": "node scripts/gen-models.mjs && prettier --write src/models.ts",
+        "gen:models": "node scripts/gen-models.mjs && prettier --write src/models.ts src/effects.ts",
         "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.mjs\" \"scripts/**/*.mjs\"",
         "check": "npm run typecheck && npm test"
     },

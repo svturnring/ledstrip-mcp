@@ -30,7 +30,7 @@ import { z } from "zod"
 import { BleLed, type CommandResult } from "./ble.js"
 import { addDevice, configPath, defaultDevice, listDevices, removeDevice, type Target } from "./config.js"
 import { debug, log, protectStdout } from "./log.js"
-import { listModels, parseColor, parseHexPacket, settleMsFor, type Protocol } from "./protocol.js"
+import { effectsForClass, listModels, parseColor, parseHexPacket, Protocol, settleMsFor } from "./protocol.js"
 import { VERSION } from "./version.js"
 
 /** Response: both text for a human and structured data for the agent. */
@@ -105,7 +105,14 @@ const actionSchema = z.discriminatedUnion("type", [
         type: z.literal("color_temperature"),
         kelvin: z.number().min(1000).max(10000).describe("Temperature in kelvin"),
     }),
-    z.object({ type: z.literal("effect"), index: z.number().min(0).describe("Effect number") }),
+    z.object({
+        type: z.literal("effect"),
+        index: z.number().min(0).optional().describe("Effect number (see the ble_effects tool)"),
+        name: z
+            .string()
+            .optional()
+            .describe("Effect name from the catalog, e.g. 'blink_red' (see the ble_effects tool)"),
+    }),
     z.object({ type: z.literal("speed"), value: z.number().min(0).describe("Effect speed (usually 0-255)") }),
     z.object({
         type: z.literal("raw"),
@@ -132,8 +139,13 @@ function buildAction(protocol: Protocol, action: Action): Buffer {
             return protocol.white(action.percent)
         case "color_temperature":
             return protocol.colorTemp(action.kelvin)
-        case "effect":
-            return protocol.effect(action.index)
+        case "effect": {
+            const wanted = action.name ?? action.index
+            if (wanted === undefined) {
+                throw new Error("effect: pass either name (from ble_effects) or index")
+            }
+            return protocol.effect(protocol.resolveEffect(wanted))
+        }
         case "speed":
             return protocol.speed(action.value)
         case "raw":
@@ -212,6 +224,53 @@ export function registerTools(server: McpServer, led: BleLed): void {
         guard(async ({ device }) => {
             const info = await led.info(targetOf(device))
             return ok(info as unknown as Record<string, unknown>, "Device profile:")
+        }),
+    )
+
+    server.registerTool(
+        "ble_effects",
+        {
+            title: "Effect catalog of the strip",
+            description:
+                "List the effects the strip supports, by name and index, for the detected (or given) model. " +
+                "The catalog is static data from the controller family — the strip itself cannot report it over BLE. " +
+                "Read-only: does not connect. Use it before picking an effect for ble_apply " +
+                "({'type':'effect','name':'blink_red'} or {'type':'effect','index':150}).",
+            inputSchema: {
+                device: deviceParam,
+                model: z.string().optional().describe("Model from ble_list_models, to override detection"),
+            },
+        },
+        guard(async ({ device, model }) => {
+            let resolvedVia: string
+            let protocol: Protocol
+            if (model) {
+                const spec = listModels().find((item) => item.name === model)
+                if (!spec) throw new Error(`model "${model}" is not in the registry, see: ble_list_models`)
+                protocol = new Protocol(spec)
+                resolvedVia = "model argument"
+            } else {
+                // status() resolves the same target the control tools use
+                // (serve flags / env / config) and does not connect.
+                const status = await led.status(targetOf(device))
+                protocol = Protocol.forDevice(status.name, status.model)
+                resolvedVia = status.model ? "config (model)" : status.name ? "config (device name)" : "default model"
+            }
+
+            return ok(
+                {
+                    model: protocol.name,
+                    resolvedVia,
+                    effectsClass: protocol.effectsClass ?? null,
+                    supportsEffects: protocol.supportsEffects,
+                    supportsEffectSpeed: protocol.supportsEffectSpeed,
+                    effectRange: protocol.effectRange,
+                    effectSpeedRange: protocol.effectSpeedRange,
+                    count: protocol.effects.length,
+                    effects: protocol.effects.map((effect) => ({ index: effect.index, name: effect.name })),
+                },
+                `${protocol.name}: ${protocol.effects.length} named effects (class ${protocol.effectsClass ?? "?"}).`,
+            )
         }),
     )
 
@@ -395,8 +454,8 @@ export function registerTools(server: McpServer, led: BleLed): void {
         {
             title: "Supported models",
             description:
-                "Known controller models with their UUIDs and the set of supported commands. " +
-                "Taken from the Home Assistant elkbledom integration.",
+                "Known controller models with their UUIDs, the set of supported commands and the effect catalog " +
+                "class (see the ble_effects tool). Taken from the Home Assistant elkbledom integration.",
             inputSchema: {},
         },
         guard(async () => {
@@ -406,6 +465,8 @@ export function registerTools(server: McpServer, led: BleLed): void {
                 notifyUuid: model.read_uuid ?? null,
                 settleMs: settleMsFor(model.name),
                 commands: Object.keys(model.commands),
+                effectsClass: model.effects_class ?? null,
+                effects: effectsForClass(model.effects_class).length,
             }))
             return ok({ count: models.length, models }, `Models in the registry: ${models.length}.`)
         }),

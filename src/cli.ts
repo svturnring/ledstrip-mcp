@@ -13,9 +13,25 @@
 import { Command } from "commander"
 
 import { BleLed, type BleLedOptions } from "./ble.js"
-import { addDevice, configPath, defaultDevice, listDevices, removeDevice, setDefaultDevice } from "./config.js"
+import {
+    addDevice,
+    configPath,
+    defaultDevice,
+    listDevices,
+    removeDevice,
+    resolveTarget,
+    setDefaultDevice,
+} from "./config.js"
 import { log, setVerbose } from "./log.js"
-import { listModels, parseColor, parseHexPacket, settleMsFor, type DecodedPacket } from "./protocol.js"
+import {
+    effectsForClass,
+    listModels,
+    parseColor,
+    parseHexPacket,
+    Protocol,
+    settleMsFor,
+    type DecodedPacket,
+} from "./protocol.js"
 import { VERSION } from "./version.js"
 interface GlobalOptions {
     address?: string
@@ -261,23 +277,24 @@ export function createProgram(): Command {
 
     sendCommand(
         "effect",
-        "turn on an effect by number (0-127, 128-135 — microphone modes)",
+        "turn on an effect by name or number (see 'effects'; 128-135 — microphone modes)",
         ([value, speed, brightness]) => {
-            const index = Number(value)
-            if (!Number.isFinite(index)) throw new Error("effect: expected an effect number")
+            const wanted = value ?? ""
+            if (!wanted) throw new Error("effect: pass an effect name or number (see: ble-mcp effects)")
             const speedValue = speed === undefined ? undefined : Number(speed)
             const brightnessValue = brightness === undefined ? undefined : toPercent(brightness, "brightness")
             return (protocol) => {
                 const packets: Buffer[] = []
                 if (speedValue !== undefined) packets.push(protocol.speed(speedValue))
                 if (brightnessValue !== undefined) packets.push(protocol.brightness(brightnessValue))
-                packets.push(protocol.effect(index))
+                // resolveEffect turns a name ("blink_red") or a number ("3") into an index.
+                packets.push(protocol.effect(protocol.resolveEffect(wanted)))
                 return packets
             }
         },
         (result) => `Effect on (${result.model}). Sent: ${result.sent.join(" | ")}`,
         [
-            { name: "index", description: "effect number" },
+            { name: "effect", description: "effect name (see effects) or number" },
             { name: "speed", description: "speed, optional", optional: true },
             { name: "brightness", description: "brightness 0-100, optional", optional: true },
         ],
@@ -343,15 +360,63 @@ export function createProgram(): Command {
                 writeUuid: model.write_uuid,
                 notifyUuid: model.read_uuid ?? null,
                 commands: Object.keys(model.commands),
+                effectsClass: model.effects_class ?? null,
+                effects: effectsForClass(model.effects_class).length,
             }))
             print(opts, models, (data) =>
                 data
                     .map(
                         (model) =>
-                            `${model.name.padEnd(16)} ${String(model.settleMs).padStart(4)} ms  ${model.writeUuid}  [${model.commands.join(", ")}]`,
+                            `${model.name.padEnd(16)} ${String(model.settleMs).padStart(4)} ms  ${model.writeUuid}  [${model.commands.join(", ")}]  effects: ${model.effectsClass ?? "—"}`,
                     )
                     .join("\n"),
             )
+        })
+
+    program
+        .command("effects")
+        .description("list the effects of the strip by name and number (no connection needed)")
+        .action(() => {
+            const opts = globals()
+            // The catalog is static data per model: resolve the model from the
+            // config, no BLE connection is needed (same fallback as the control
+            // tools — the default model, if nothing is configured).
+            let protocol: Protocol
+            let resolvedVia: string
+            try {
+                const target = resolveTarget({
+                    address: opts.address,
+                    name: opts.name,
+                    model: opts.model,
+                    device: opts.device,
+                })
+                protocol = Protocol.forDevice(target.name, target.model)
+                resolvedVia = target.model ? "config (model)" : "config (device name)"
+            } catch (error) {
+                if (!opts.model) throw error
+                protocol = Protocol.forDevice(undefined, opts.model)
+                resolvedVia = "-m flag"
+            }
+            const payload = {
+                model: protocol.name,
+                resolvedVia,
+                effectsClass: protocol.effectsClass ?? null,
+                supportsEffects: protocol.supportsEffects,
+                supportsEffectSpeed: protocol.supportsEffectSpeed,
+                effectRange: protocol.effectRange,
+                effectSpeedRange: protocol.effectSpeedRange,
+                count: protocol.effects.length,
+                effects: protocol.effects.map((effect) => ({ index: effect.index, name: effect.name })),
+            }
+            print(opts, payload, (data) => {
+                const lines = [
+                    `${data.model} · class ${data.effectsClass ?? "—"} · ${data.count} effects · ` +
+                        `speed ${data.effectSpeedRange.min}-${data.effectSpeedRange.max}` +
+                        (data.supportsEffects ? "" : " · this model has no effect command"),
+                ]
+                for (const effect of data.effects) lines.push(`  ${String(effect.index).padStart(4)}  ${effect.name}`)
+                return lines.join("\n")
+            })
         })
 
     program

@@ -102,3 +102,82 @@ test("ble_apply skips an unsupported action and still applies the rest", async (
     await client.close()
     await led.close()
 })
+
+test("ble_apply sets an effect by name and reports an unknown one", async () => {
+    const fake = createFakeBle({ modelName: "ELK-BLEDDM" })
+    const led = new BleLed({
+        warmMs: 0,
+        target: { address: ADDRESS, model: "ELK-BLEDDM" },
+        createBluetooth: fake.createBluetooth,
+    })
+    const client = await connectClient(led)
+
+    const response = await client.callTool({
+        name: "ble_apply",
+        arguments: {
+            actions: [
+                { type: "effect", name: "blink_red" },
+                { type: "effect", name: "no-such-effect" },
+            ],
+        },
+    })
+
+    const payload = response.structuredContent
+    assert.equal(payload.applied.length, 1, "blink_red must go through")
+    // blink_red is index 150 in the EFFECTS class; the effect byte is at offset 3.
+    assert.equal(fake.log.writes[0][3], 150)
+    assert.equal(payload.skipped.length, 1, "an unknown name must be skipped and reported, not sent")
+    assert.match(payload.skipped[0].error, /unknown effect "no-such-effect"/)
+    assert.equal(fake.log.writes.length, 1)
+
+    await client.close()
+    await led.close()
+})
+
+test("ble_effects lists the catalog of the detected model without connecting", async () => {
+    const fake = createFakeBle({ modelName: "ELK-BLEDDM" })
+    const led = new BleLed({
+        warmMs: 0,
+        target: { address: ADDRESS, model: "ELK-BLEDDM" },
+        createBluetooth: fake.createBluetooth,
+    })
+    const client = await connectClient(led)
+
+    const response = await client.callTool({ name: "ble_effects", arguments: {} })
+
+    const payload = response.structuredContent
+    assert.equal(payload.model, "ELK-BLEDDM")
+    assert.equal(payload.effectsClass, "EFFECTS")
+    assert.equal(payload.supportsEffects, true)
+    assert.equal(payload.supportsEffectSpeed, true)
+    assert.ok(
+        payload.effects.some((effect) => effect.name === "blink_red" && effect.index === 150),
+        "the catalog must contain blink_red=150",
+    )
+    assert.equal(fake.log.connects, 0, "browsing the catalog must not touch the device")
+
+    await client.close()
+    await led.close()
+})
+
+test("ble_effects with an explicit model shows that model's catalog", async () => {
+    const fake = createFakeBle()
+    const led = new BleLed({ warmMs: 0, createBluetooth: fake.createBluetooth })
+    const client = await connectClient(led)
+
+    const response = await client.callTool({ name: "ble_effects", arguments: { model: "MELK-OA21" } })
+
+    const payload = response.structuredContent
+    assert.equal(payload.model, "MELK-OA21")
+    assert.equal(payload.effectsClass, "EFFECTS_STRIPX")
+    assert.ok(payload.effects.length > 200, `expected many effects, got ${payload.effects.length}`)
+    assert.ok(payload.effects.some((effect) => effect.name === "music_flow_flash"))
+
+    // An unknown model is an error, not a silent default.
+    const bad = await client.callTool({ name: "ble_effects", arguments: { model: "no-such-model" } })
+    assert.equal(bad.isError, true)
+    assert.match(bad.structuredContent.error, /is not in the registry/)
+
+    await client.close()
+    await led.close()
+})

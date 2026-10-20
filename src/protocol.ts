@@ -21,6 +21,7 @@
  *     models.ts).
  */
 
+import { effectsForClass, type EffectDef } from "./effects.js"
 import { MODELS, settleMsFor, type ModelCommands, type ModelSpec, type Template } from "./models.js"
 
 /** Default service (some models use a different one, so the UUID comes from the model). */
@@ -35,6 +36,8 @@ export const DEFAULT_MODEL_NAME = "ELK-BLEDDM"
 
 export type { ModelSpec, ModelCommands, Template, Byte, Placeholder } from "./models.js"
 export { settleMsFor, MODELS } from "./models.js"
+export type { EffectDef } from "./effects.js"
+export { effectsForClass, EFFECT_CLASS_NAMES } from "./effects.js"
 
 export interface Rgb {
     r: number
@@ -241,15 +244,68 @@ export class Protocol {
 
     /** Effect index (0-127 on most models, 128-135 are mic modes). */
     effect(value: number): Buffer {
-        const max = this.model.effect_range?.max ?? 255
-        return this.build("effect", { v: clamp(Math.round(value), 0, max) }, "effect")
+        return this.build("effect", { v: clamp(Math.round(value), 0, this.effectRange.max) }, "effect")
     }
 
     /** Effect speed. */
     speed(value: number): Buffer {
-        const min = this.model.effect_speed_range?.min ?? 0
-        const max = this.model.effect_speed_range?.max ?? 255
+        const { min, max } = this.effectSpeedRange
         return this.build("effect_speed", { v: clamp(Math.round(value), min, max) }, "effect speed")
+    }
+
+    /** Named effects of this model's class, in the phone-app order. */
+    get effects(): readonly EffectDef[] {
+        return effectsForClass(this.model.effects_class)
+    }
+
+    /** The effects class of the model ("EFFECTS", "EFFECTS_STRIPX", ...). */
+    get effectsClass(): string | undefined {
+        return this.model.effects_class
+    }
+
+    /** Whether the model has an effect command at all. */
+    get supportsEffects(): boolean {
+        return Boolean(this.model.commands.effect?.length)
+    }
+
+    /** Whether the model has an effect-speed command. */
+    get supportsEffectSpeed(): boolean {
+        return Boolean(this.model.commands.effect_speed?.length)
+    }
+
+    /** Range of effect indexes this model accepts. */
+    get effectRange(): { min: number; max: number } {
+        if (this.model.effect_range) return this.model.effect_range
+        // No declared range: 0-255 covers the classic indexes (and the 128-135
+        // mic modes), but a catalog may know higher ones (EFFECTS_STRIPX goes
+        // up to 391) — they must not be silently clamped away.
+        const catalogMax = this.effects.reduce((max, effect) => Math.max(max, effect.index), 0)
+        return { min: 0, max: Math.max(255, catalogMax) }
+    }
+
+    /** Range of effect speed this model accepts. */
+    get effectSpeedRange(): { min: number; max: number } {
+        return this.model.effect_speed_range ?? { min: 0, max: 255 }
+    }
+
+    /**
+     * Turn an effect reference into an index: a number stays a number, a string
+     * is either a number ("3") or a catalog name ("blink_red", matched
+     * case-insensitively and ignoring `_`/`-`/spaces).
+     */
+    resolveEffect(value: number | string): number {
+        const { min, max } = this.effectRange
+        if (typeof value === "number") return clamp(Math.round(value), min, max)
+        const trimmed = value.trim()
+        if (/^\d+$/.test(trimmed)) return clamp(Number(trimmed), min, max)
+        const wanted = normalizeEffectName(trimmed)
+        const found = this.effects.find((effect) => normalizeEffectName(effect.name) === wanted)
+        if (found) return found.index
+        const known = this.effects.map((effect) => effect.name).join(", ")
+        throw new Error(
+            `unknown effect "${value}" for ${this.name}` +
+                (known ? `. Known effects: ${known}` : " (this model has no effect catalog)"),
+        )
     }
 
     /** Color temperature: 1800K (warm) … 7000K (cool). */
@@ -267,6 +323,11 @@ export class Protocol {
 }
 
 // --- Parsing user input ---------------------------------------------------
+
+/** Effect-name matching ignores case and `_`/`-`/spaces: "Blink Red" == "blink_red". */
+export function normalizeEffectName(name: string): string {
+    return name.toLowerCase().replace(/[\s_-]+/g, "")
+}
 
 /** `#ff8800` | `ff8800` | `255,136,0` | `255 136 0` → RGB. */
 export function parseColor(value: string): Rgb {

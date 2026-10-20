@@ -33,7 +33,8 @@ ble-mcp attach living-room AA:BB:CC:DD:EE:01 --default    # bind a found strip u
 ble-mcp on                                                # the default strip
 ble-mcp color '#ff8800'
 ble-mcp brightness 40
-ble-mcp effect 3 128 70                                   # effect, speed, brightness — as one series
+ble-mcp effects                                           # what this strip can do, by name
+ble-mcp effect blink_red 128 70                           # effect by name, speed, brightness — as one series
 ble-mcp off
 ```
 
@@ -92,8 +93,9 @@ The same works from an agent: `ble_scan` → `ble_add_device` → the control to
 | `white <0-100>` | white light at the given brightness |
 | `brightness <0-100>` | set brightness |
 | `kelvin <K>` | color temperature (1800 K warm … 7000 K cool) |
-| `effect <n> [speed] [brightness]` | effect by index (0-127 standard, 128-135 mic modes) |
+| `effect <name\|n> [speed] [brightness]` | effect by name (`blink_red`) or index (`150`) |
 | `speed <v>` | speed of the current effect |
+| `effects` | list the strip's effects by name and index (no connection needed) |
 | `raw <hex>` | send an arbitrary packet, for debugging |
 | `watch [-d seconds]` | listen to the notify channel |
 | `models` | list supported controller models |
@@ -179,6 +181,7 @@ Connecting from opencode:
 | `ble_status` | `device?` | config and connection state |
 | `ble_scan` | `durationSeconds?` | scan the air and hint which devices look like LED strips |
 | `ble_info` | `device?` | GATT profile and detected model |
+| `ble_effects` | `device?`, `model?` | the strip's effects by name and index, plus the effect-speed range (static catalog, no connection) |
 | `ble_apply` | `actions[]`, `device?` | **one ordered batch of commands over one connection** (see below) |
 | `ble_watch` | `durationSeconds?`, `device?` | listen to the notify channel |
 | `ble_devices` | — | list saved strips, which is the default and which are connected |
@@ -204,11 +207,11 @@ The connection is released the moment the call returns, so a second tool call wo
 }
 ```
 
-One `actions[]` entry — one packet. Action types: `power` (`state: on|off`), `color` (`color: "#rrggbb"`), `brightness` (`percent`), `white` (`percent`), `color_temperature` (`kelvin`), `effect` (`index`), `speed` (`value`), `raw` (`hex: "7e 04 04 f0 00 01 ff 00 ef"`). Order matters: for conflicting modes the last one wins, and a `speed`/`brightness` that belongs to an effect must come **before** the effect itself. The mandatory settle delay is honoured after every packet, in order.
+One `actions[]` entry — one packet. Action types: `power` (`state: on|off`), `color` (`color: "#rrggbb"`), `brightness` (`percent`), `white` (`percent`), `color_temperature` (`kelvin`), `effect` (`index` **or** `name` from the ble_effects catalog), `speed` (`value`), `raw` (`hex: "7e 04 04 f0 00 01 ff 00 ef"`). Order matters: for conflicting modes the last one wins, and a `speed`/`brightness` that belongs to an effect must come **before** the effect itself. The mandatory settle delay is honoured after every packet, in order.
 
-An action the detected model does not support is **skipped and reported** while the rest are still applied — the answer lists `applied` and `skipped` per index.
+An action the detected model does not support is **skipped and reported** while the rest are still applied — the answer lists `applied` and `skipped` per index. The same applies to an effect name the catalog does not know: it is skipped with an error listing the known names, never sent blindly.
 
-A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` → `ble_add_device` per strip → `ble_apply` with `device`, e.g. `{"device":"bedroom","actions":[{"type":"color","color":"#ff0000"}]}`.
+A typical agent flow: `ble_status` → (if the address is unknown) `ble_scan` → `ble_add_device` per strip → `ble_effects` to see what the strip can do → `ble_apply` with `device`, e.g. `{"device":"bedroom","actions":[{"type":"speed","value":128},{"type":"effect","name":"blink_red"}]}`.
 
 ## Configuration
 
@@ -236,6 +239,7 @@ Environment variables: `BLE_MCP_ADDRESS`, `BLE_MCP_NAME`, `BLE_MCP_MODEL`, `BLE_
 
 ```
 src/models.ts    — model registry (generated from models/models.json)
+src/effects.ts   — effect catalogs per controller family (generated from models/definitions.json)
 src/protocol.ts  — packet building/parsing, input parsers, model detection, device-name classifier
 src/config.ts    — config: named devices, priority rules
 src/log.ts       — logging, always to stderr
@@ -280,10 +284,24 @@ For ELK-BLEDDM the write characteristic is `0000fff3-…` and notify is `0000fff
 Data comes from `models.json` of the Home Assistant integration [dave-code-ruiz/elkbledom](https://github.com/dave-code-ruiz/elkbledom) (MIT) and is **baked into the code** by a generator, so no file is read at runtime:
 
 ```sh
-npm run gen:models   # models/models.json → src/models.ts (+ prettier)
+npm run gen:models   # models/models.json → src/models.ts, models/definitions.json → src/effects.ts (+ prettier)
 ```
 
 The model is detected from the device name (prefix match, longest match wins, the generic variant is preferred). It can also be forced: `-m ELK-BTC`.
+
+### Effects
+
+The controller is **write-only**: over Bluetooth it never reports which effects it supports — the effect is just a number in the packet, and nothing on the air explains what the numbers mean. So the name → index table is **static data, known in advance**, reverse-engineered from the phone apps and pinned from `definitions.json` of the same elkbledom integration (MIT). Each controller family has its own catalog, referenced by the model's `effects_class`:
+
+| Class | Models (examples) | Effects |
+| --- | --- | --- |
+| `EFFECTS` | ELK-BLEDDM, ELK-BLEDOM, LEDBLE | 22: jump / crossfade / blink |
+| `EFFECTS_STRIPX` | MELK-OA21 | 228, including music modes (indexes up to 391) |
+| `EFFECTS_MELK_Ox` | MELK-O*10 | 13 |
+| `EFFECTS_MELK` | MELK | 16 |
+| `EFFECTS_DMRRBA` | DMRRBA-007 | 9 |
+
+An agent (or a human) browses the catalog with the `ble_effects` tool / `effects` command — no internet needed — and then sets an effect **by name** (`{"type":"effect","name":"blink_red"}`) or by index. A name the catalog does not know is skipped and reported, never sent blindly. Effect **speed** is a separate command with its own per-model range (0–255 by default, 0–183 for ELK-BLEDOB), applied by the `speed` action / `speed` command — and, like brightness, it must come **before** the effect in the same batch.
 
 ## Development
 
@@ -309,4 +327,4 @@ Tests need no hardware: packet building is checked against reference bytes captu
 
 ## License
 
-MIT. The model registry and protocol design come from [elkbledom](https://github.com/dave-code-ruiz/elkbledom) (MIT).
+MIT. The model registry, effect catalogs and protocol design come from [elkbledom](https://github.com/dave-code-ruiz/elkbledom) (MIT).
