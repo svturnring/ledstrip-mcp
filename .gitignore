@@ -1,4 +1,4 @@
 node_modules/
-dist/
+# dist/ is committed: npm install -g github:... works with no build step on the user side
 *.log
 .DS_Store

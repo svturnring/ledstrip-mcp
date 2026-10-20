@@ -1,0 +1,477 @@
+/**
+ * `ledstrip-mcp` CLI interface.
+ *
+ * Works independently of any agent environment: the same operations available
+ * as MCP tools can be invoked by hand from a terminal.
+ *
+ * Output convention:
+ *   - human-readable text by default;
+ *   - `--json` — machine-readable output (easy to grep and parse from scripts);
+ *   - progress/diagnostics — on stderr, useful data — on stdout.
+ */
+import { Command } from "commander";
+import { BleLed } from "./ble.js";
+import { addDevice, configPath, defaultDevice, listDevices, removeDevice, resolveTarget, setDefaultDevice, } from "./config.js";
+import { log, setVerbose } from "./log.js";
+import { effectsForClass, listModels, MIC_EFFECT_MODES, parseColor, parseHexPacket, Protocol, settleMsFor, } from "./protocol.js";
+import { VERSION } from "./version.js";
+function toMilliseconds(value, flag) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0)
+        throw new Error(`${flag}: expected a non-negative number of seconds`);
+    return Math.round(seconds * 1000);
+}
+function toPercent(value, flag) {
+    const percent = Number(value);
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+        throw new Error(`${flag}: expected 0-100`);
+    }
+    return Math.round(percent);
+}
+/**
+ * Shared scaffolding: create the strip handle, run the operation, and always
+ * disconnect at the end (otherwise a dangling BLE connection is left behind and
+ * the strip stays occupied).
+ */
+async function withLed(opts, operation) {
+    const options = {
+        target: { address: opts.address, name: opts.name, model: opts.model, device: opts.device },
+        timeoutMs: opts.timeout,
+        warmMs: opts.warm,
+    };
+    const led = new BleLed(options);
+    try {
+        return await operation(led);
+    }
+    finally {
+        await led.close().catch(() => undefined);
+    }
+}
+function print(opts, data, human) {
+    if (opts.json)
+        process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+    else
+        process.stdout.write(`${human(data)}\n`);
+}
+function signalText(value) {
+    return typeof value === "number" ? `${String(value).padStart(4)} dBm` : "   ? dBm";
+}
+export function createProgram() {
+    const program = new Command();
+    program
+        .name("ledstrip-mcp")
+        .description("Control BLE LED strips ELK-BLEDDM / ELK-BLEDOM / ELK-BTC / LEDBLE / MELK")
+        .version(VERSION)
+        .option("-a, --address <mac>", "MAC address of the strip (otherwise search by name)")
+        .option("-n, --name <name>", "advertised device name")
+        .option("-m, --model <model>", "forced model from the registry (see models)")
+        .option("-D, --device <alias>", "saved strip by alias from the config (see devices)")
+        .option("--timeout <ms>", "how long to wait for the device to appear, ms", "30000")
+        .option("--warm <ms>", "keep the connection warm after a command, ms (0 = release immediately)", "0")
+        .option("--json", "machine-readable output")
+        .option("-v, --verbose", "verbose log to stderr");
+    const globals = () => {
+        const opts = program.opts();
+        const result = {
+            ...opts,
+            timeout: Number(opts.timeout),
+            warm: Number(opts.warm),
+        };
+        if (!Number.isFinite(result.timeout))
+            result.timeout = 30_000;
+        if (!Number.isFinite(result.warm))
+            result.warm = 0;
+        return result;
+    };
+    // --- Diagnostics ------------------------------------------------------
+    program
+        .command("scan")
+        .description("scan the air and show nearby BLE devices")
+        .option("-d, --duration <seconds>", "scan duration", "10")
+        .action(async (cmd) => {
+        const opts = globals();
+        const durationMs = toMilliseconds(cmd.duration, "--duration");
+        const results = await withLed(opts, (led) => led.scan(durationMs));
+        const target = results.filter((item) => item.matchesTarget);
+        print(opts, { found: results.length, target: target[0] ?? null, devices: results }, (data) => {
+            const lines = [`Devices found: ${data.devices.length}`];
+            if (data.devices.length === 0) {
+                lines.push("Nothing visible. Check that the strip is powered and the phone app is closed.");
+            }
+            for (const device of data.devices) {
+                const marks = [
+                    device.matchesTarget ? "<- target" : "",
+                    device.likely ? "looks like LED" : "",
+                    device.fresh ? "fresh" : "from cache",
+                    device.addressType ?? "",
+                ].filter(Boolean);
+                lines.push(`  ${signalText(device.rssi)}  ${device.address}  ${(device.name ?? "(no name)").padEnd(24)} ${marks.join(", ")}  — ${device.hint}`);
+            }
+            if (target.length === 0) {
+                lines.push("Target not found by name — the phone may still hold the connection.");
+            }
+            return lines.join("\n");
+        });
+    });
+    program
+        .command("status")
+        .description("show the config and the current connection state")
+        .action(async () => {
+        const opts = globals();
+        const info = await withLed(opts, (led) => led.status());
+        print(opts, info, (data) => [
+            `Config:     ${data.configPath}`,
+            `Address:    ${data.address ?? "(not set — search by name)"}`,
+            `Name:       ${data.name}`,
+            `Model:      ${data.model ?? "(auto-detected)"}`,
+            `Connection: ${data.connected ? `active with ${data.deviceName ?? "?"}` : "none"}`,
+            `Protocol:   ${data.protocol ?? "—"}${data.settleMs ? `, settle ${data.settleMs} ms` : ""}`,
+            `Last:       ${data.lastSent ?? "—"}`,
+        ].join("\n"));
+    });
+    program
+        .command("info")
+        .description("connect and show the GATT profile (services and characteristics)")
+        .action(async () => {
+        const opts = globals();
+        const info = await withLed(opts, (led) => led.info());
+        print(opts, info, (data) => {
+            const lines = [
+                `Device:     ${data.name ?? "(no name)"} [${data.address ?? "?"}] ${signalText(data.rssi)}`,
+                `Model:      ${data.model}`,
+                `Write:      ${data.writeUuid}`,
+                `Notify:     ${data.notifyUuid}`,
+                `Settle:     ${data.settleMs} ms between commands`,
+                "Services:",
+            ];
+            for (const service of data.services) {
+                lines.push(`  ${service.uuid}`);
+                for (const characteristic of service.characteristics) {
+                    lines.push(`    ${characteristic.uuid}  [${characteristic.flags.join(", ") || "—"}]`);
+                }
+            }
+            return lines.join("\n");
+        });
+    });
+    // --- Control ----------------------------------------------------------
+    const sendCommand = (name, description, build, human, args = []) => {
+        const command = program.command(name).description(description);
+        for (const arg of args) {
+            if (arg.variadic)
+                command.argument("<value...>", arg.description);
+            else if (arg.optional)
+                command.argument(`[${arg.name}]`, arg.description);
+            else
+                command.argument(`<${arg.name}>`, arg.description);
+        }
+        command.action(async (...collected) => {
+            const opts = globals();
+            // The last argument is commander's command object; drop it.
+            const values = collected.slice(0, args.length).flat();
+            const result = await withLed(opts, (led) => led.send(build(values)));
+            print(opts, result, human);
+        });
+    };
+    sendCommand("on", "turn the strip on", () => (protocol) => protocol.turnOn(), (result) => `On. Sent: ${result.sent.join(" | ")}`);
+    sendCommand("off", "turn the strip off", () => (protocol) => protocol.turnOff(), (result) => `Off. Sent: ${result.sent.join(" | ")}`);
+    sendCommand("color", "set color: #ff8800, ff8800 or 255,136,0", ([value]) => {
+        const rgb = parseColor(value ?? "");
+        return (protocol) => protocol.color(rgb);
+    }, (result) => `Color set. Sent: ${result.sent.join(" | ")}`, [{ name: "value", description: "#rrggbb | rrggbb | r,g,b" }]);
+    sendCommand("white", "white light, brightness in percent (0-100)", ([value]) => {
+        const percent = toPercent(value ?? "", "white");
+        return (protocol) => protocol.white(percent);
+    }, (result) => `White ${result.sent.length ? "on" : "not sent"}. Sent: ${result.sent.join(" | ")}`, [{ name: "percent", description: "0-100" }]);
+    sendCommand("brightness", "brightness in percent (0-100)", ([value]) => {
+        const percent = toPercent(value ?? "", "brightness");
+        return (protocol) => protocol.brightness(percent);
+    }, (result) => `Brightness changed. Sent: ${result.sent.join(" | ")}`, [{ name: "percent", description: "0-100" }]);
+    sendCommand("kelvin", "color temperature, K (usually 1800-7000)", ([value]) => {
+        const kelvin = Number(value);
+        if (!Number.isFinite(kelvin))
+            throw new Error("kelvin: expected a number");
+        return (protocol) => protocol.colorTemp(kelvin);
+    }, (result) => `Temperature set. Sent: ${result.sent.join(" | ")}`, [{ name: "kelvin", description: "e.g. 3000" }]);
+    sendCommand("effect", "turn on an effect by name or number (see 'effects'; 128-135 — microphone modes)", ([value, speed, brightness]) => {
+        const wanted = value ?? "";
+        if (!wanted)
+            throw new Error("effect: pass an effect name or number (see: ledstrip-mcp effects)");
+        const speedValue = speed === undefined ? undefined : Number(speed);
+        const brightnessValue = brightness === undefined ? undefined : toPercent(brightness, "brightness");
+        return (protocol) => {
+            const packets = [];
+            if (speedValue !== undefined)
+                packets.push(protocol.speed(speedValue));
+            if (brightnessValue !== undefined)
+                packets.push(protocol.brightness(brightnessValue));
+            // resolveEffect turns a name ("blink_red") or a number ("3") into an index.
+            packets.push(protocol.effect(protocol.resolveEffect(wanted)));
+            return packets;
+        };
+    }, (result) => `Effect on (${result.model}). Sent: ${result.sent.join(" | ")}`, [
+        { name: "effect", description: "effect name (see effects) or number" },
+        { name: "speed", description: "speed, optional", optional: true },
+        { name: "brightness", description: "brightness 0-100, optional", optional: true },
+    ]);
+    sendCommand("speed", "speed of the current effect", ([value]) => {
+        const speed = Number(value);
+        if (!Number.isFinite(speed))
+            throw new Error("speed: expected a number");
+        return (protocol) => protocol.speed(speed);
+    }, (result) => `Speed set. Sent: ${result.sent.join(" | ")}`, [{ name: "value", description: "0-255" }]);
+    sendCommand("mic", "turn the controller's microphone on|off (music reaction runs on the strip itself)", ([value]) => {
+        const state = (value ?? "").toLowerCase();
+        if (state !== "on" && state !== "off")
+            throw new Error("mic: expected on or off");
+        return (protocol) => protocol.mic(state);
+    }, (result) => `Microphone ${result.sent.length ? "switched" : "not sent"}. Sent: ${result.sent.join(" | ")}`, [{ name: "state", description: "on | off" }]);
+    sendCommand("mic-sensitivity", "microphone sensitivity in percent (0-100)", ([value]) => {
+        const percent = toPercent(value ?? "", "mic-sensitivity");
+        return (protocol) => protocol.micSensitivity(percent);
+    }, (result) => `Sensitivity set. Sent: ${result.sent.join(" | ")}`, [{ name: "percent", description: "0-100" }]);
+    sendCommand("mic-effect", "microphone reaction mode by name or number (see 'effects'; e.g. soft or 129)", ([value]) => {
+        const wanted = value ?? "";
+        if (!wanted)
+            throw new Error("mic-effect: pass a mode name or number (see: ledstrip-mcp effects)");
+        return (protocol) => protocol.micEffect(wanted);
+    }, (result) => `Mic mode on (${result.model}). Sent: ${result.sent.join(" | ")}`, [{ name: "mode", description: "mode name (see effects) or number 128-135" }]);
+    sendCommand("raw", "send a raw hex packet (for protocol debugging)", ([value]) => {
+        const packet = parseHexPacket(value ?? "");
+        return () => packet;
+    }, (result) => `Sent: ${result.sent.join(" | ")}`, [{ name: "hex", description: "e.g. '7e 04 04 f0 00 01 ff 00 ef'" }]);
+    program
+        .command("watch")
+        .description("listen to the notify channel (the controller echoes our own commands)")
+        .option("-d, --duration <seconds>", "how long to listen", "15")
+        .action(async (cmd) => {
+        const opts = globals();
+        const durationMs = toMilliseconds(cmd.duration, "--duration");
+        const collected = [];
+        const result = await withLed(opts, (led) => led.watch(durationMs, (packet) => {
+            collected.push(packet);
+            if (!opts.json) {
+                const note = packet.state ? "state" : packet.looksLikeEcho ? "echo" : "?";
+                process.stdout.write(`  ${packet.raw}   (${note})\n`);
+            }
+        }));
+        print(opts, result, (data) => data.packets.length === 0
+            ? `Silence on ${data.notifyUuid} for ${Math.round(durationMs / 1000)} s — the controller does not answer passive listening.`
+            : `Packets received: ${data.packets.length}`);
+    });
+    // --- Model registry and config ----------------------------------------
+    program
+        .command("models")
+        .description("list of supported controller models")
+        .action(() => {
+        const opts = globals();
+        const models = listModels().map((model) => ({
+            name: model.name,
+            settleMs: settleMsFor(model.name),
+            writeUuid: model.write_uuid,
+            notifyUuid: model.read_uuid ?? null,
+            commands: Object.keys(model.commands),
+            effectsClass: model.effects_class ?? null,
+            effects: effectsForClass(model.effects_class).length,
+        }));
+        print(opts, models, (data) => data
+            .map((model) => `${model.name.padEnd(16)} ${String(model.settleMs).padStart(4)} ms  ${model.writeUuid}  [${model.commands.join(", ")}]  effects: ${model.effectsClass ?? "—"}`)
+            .join("\n"));
+    });
+    program
+        .command("effects")
+        .description("list the effects of the strip by name and number (no connection needed)")
+        .action(() => {
+        const opts = globals();
+        // The catalog is static data per model: resolve the model from the
+        // config, no BLE connection is needed (same fallback as the control
+        // tools — the default model, if nothing is configured).
+        let protocol;
+        let resolvedVia;
+        try {
+            const target = resolveTarget({
+                address: opts.address,
+                name: opts.name,
+                model: opts.model,
+                device: opts.device,
+            });
+            protocol = Protocol.forDevice(target.name, target.model);
+            resolvedVia = target.model ? "config (model)" : "config (device name)";
+        }
+        catch (error) {
+            if (!opts.model)
+                throw error;
+            protocol = Protocol.forDevice(undefined, opts.model);
+            resolvedVia = "-m flag";
+        }
+        const payload = {
+            model: protocol.name,
+            resolvedVia,
+            effectsClass: protocol.effectsClass ?? null,
+            supportsEffects: protocol.supportsEffects,
+            supportsEffectSpeed: protocol.supportsEffectSpeed,
+            effectRange: protocol.effectRange,
+            effectSpeedRange: protocol.effectSpeedRange,
+            count: protocol.effects.length,
+            effects: protocol.effects.map((effect) => ({ index: effect.index, name: effect.name })),
+            micModes: MIC_EFFECT_MODES.map((mode) => ({
+                index: mode.index,
+                name: mode.name,
+                aliases: mode.aliases ?? [],
+            })),
+            micSensitivityRange: { min: 0, max: 100 },
+        };
+        print(opts, payload, (data) => {
+            const lines = [
+                `${data.model} · class ${data.effectsClass ?? "—"} · ${data.count} effects · ` +
+                    `speed ${data.effectSpeedRange.min}-${data.effectSpeedRange.max}` +
+                    (data.supportsEffects ? "" : " · this model has no effect command"),
+            ];
+            for (const effect of data.effects)
+                lines.push(`  ${String(effect.index).padStart(4)}  ${effect.name}`);
+            if (data.supportsEffects) {
+                lines.push("microphone reaction modes (controller's own mic; 'mic on' first):");
+                for (const mode of data.micModes) {
+                    const aliases = mode.aliases.length ? `  (${mode.aliases.join(", ")})` : "";
+                    lines.push(`  ${String(mode.index).padStart(4)}  ${mode.name}${aliases}`);
+                }
+            }
+            return lines.join("\n");
+        });
+    });
+    program
+        .command("devices")
+        .description("list of saved strips (alias → address/name/model), * — the default one")
+        .action(() => {
+        const opts = globals();
+        const devices = listDevices();
+        const def = defaultDevice() ?? null;
+        print(opts, { path: configPath(), default: def, devices }, (data) => {
+            const aliases = Object.keys(data.devices).sort();
+            if (aliases.length === 0) {
+                return ("No saved strips.\n" +
+                    "Find the address first:  ledstrip-mcp scan\n" +
+                    "Then attach it:          ledstrip-mcp attach <name> <MAC>   (for example: attach bedroom AA:BB:CC:DD:EE:FF)");
+            }
+            return aliases
+                .map((alias) => {
+                const entry = data.devices[alias];
+                const mark = alias === data.default ? "*" : " ";
+                const where = entry?.address ?? (entry?.name ? `by name ${entry.name}` : "address unknown");
+                const model = entry?.model ? ` [${entry.model}]` : "";
+                return `${mark} ${alias.padEnd(16)} ${where}${model}`;
+            })
+                .join("\n");
+        });
+    });
+    program
+        .command("attach")
+        .description("attach a discovered device under a name (alias), e.g. 'bedroom'")
+        .argument("<alias>", "strip name, e.g. 'bedroom' or 'living-room'")
+        .argument("[mac]", "MAC address from scan (if still unknown, pass --dev-name)")
+        .option("--dev-name <name>", "advertised device name (if the MAC is not known yet)")
+        .option("--dev-model <model>", "forced model from the registry")
+        .option("--default", "make it the default device")
+        .action((alias, mac, cmd) => {
+        const opts = globals();
+        const isNew = !(alias in listDevices());
+        if (isNew && !mac && !cmd.devName) {
+            throw new Error("pass the MAC (positionally) or --dev-name, otherwise there is nothing to attach");
+        }
+        const config = addDevice(alias, { address: mac, name: cmd.devName, model: cmd.devModel }, { makeDefault: Boolean(cmd.default) });
+        const entry = config.devices?.[alias];
+        print(opts, { path: configPath(), alias, entry: entry ?? null, default: config.default ?? null }, () => `Attached: "${alias}" → ${entry?.address ?? (entry?.name ? `by name ${entry.name}` : "?")}`);
+    });
+    program
+        .command("detach")
+        .description("detach a strip by name (alias)")
+        .argument("<alias>", "strip name")
+        .action((alias) => {
+        const opts = globals();
+        const config = removeDevice(alias);
+        print(opts, { path: configPath(), alias, default: config.default ?? null }, () => `Detached: "${alias}"`);
+    });
+    program
+        .command("default")
+        .description("make the strip the default device")
+        .argument("<alias>", "strip name")
+        .action((alias) => {
+        const opts = globals();
+        const config = setDefaultDevice(alias);
+        print(opts, { path: configPath(), default: config.default ?? null }, () => `Default: "${alias}"`);
+    });
+    // --- MCP --------------------------------------------------------------
+    program
+        .command("serve")
+        .description("start the MCP server (for agents: opencode, Claude Desktop, any MCP client)")
+        .option("-t, --transport <kind>", "stdio | http", "stdio")
+        .option("--host <host>", "HTTP server address", "127.0.0.1")
+        .option("-p, --port <port>", "HTTP server port", "8765")
+        .option("--path <path>", "HTTP endpoint path", "/mcp")
+        .option("--stateless", "HTTP without sessions (simpler behind a proxy)")
+        .action(async (cmd) => {
+        const opts = globals();
+        // The channel is released as soon as a tool call returns (warm 0 is the
+        // default). A strip is single-client, so holding it between calls would
+        // lock the phone out; batches go into ONE ble_apply call instead.
+        // `--warm <ms>` stays as an explicit opt-in for a warm window.
+        const led = new BleLed({
+            target: { address: opts.address, name: opts.name, model: opts.model, device: opts.device },
+            timeoutMs: opts.timeout,
+            warmMs: opts.warm,
+        });
+        const { startStdioServer, startHttpServer } = await import("./mcp.js");
+        if (cmd.transport === "stdio") {
+            await startStdioServer(led);
+            return;
+        }
+        if (cmd.transport === "http") {
+            const port = Number(cmd.port);
+            if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+                throw new Error(`--port: invalid port ${cmd.port}`);
+            }
+            const server = await startHttpServer(led, {
+                host: cmd.host,
+                port,
+                path: cmd.path.startsWith("/") ? cmd.path : `/${cmd.path}`,
+                stateless: Boolean(cmd.stateless),
+            });
+            log(`MCP (streamable HTTP) listening on http://${cmd.host}:${port}${server.path}`);
+            log("For opencode: type=remote, url=http://host:port/path");
+            return;
+        }
+        throw new Error(`--transport accepts only stdio or http, got "${cmd.transport}"`);
+    });
+    return program;
+}
+export async function runCli(argv = process.argv) {
+    const args = argv.slice(2);
+    if (args.includes("-v") || args.includes("--verbose"))
+        setVerbose(true);
+    const program = createProgram();
+    program.exitOverride();
+    program.configureOutput({
+        writeErr: (text) => process.stderr.write(text),
+        writeOut: (text) => process.stdout.write(text),
+    });
+    if (args.length === 0) {
+        // outputHelp() just prints and does not throw (help() throws).
+        program.outputHelp();
+        return;
+    }
+    try {
+        await program.parseAsync(argv);
+    }
+    catch (error) {
+        // Commander reports parse errors via exceptions with a `code` field
+        // (their `name` is always "CommanderError"). It has already printed the
+        // message itself, so here we only need to set the exit code.
+        const commanderError = error;
+        if (typeof commanderError.code === "string" && commanderError.code.startsWith("commander.")) {
+            if ((commanderError.exitCode ?? 1) !== 0)
+                process.exitCode = commanderError.exitCode ?? 1;
+            return;
+        }
+        throw error;
+    }
+}
+//# sourceMappingURL=cli.js.map

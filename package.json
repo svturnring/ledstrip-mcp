@@ -39,7 +39,6 @@
     ],
     "scripts": {
         "build": "tsc",
-        "prepare": "node scripts/prepare.mjs",
         "typecheck": "tsc --noEmit",
         "start": "node dist/index.js",
         "dev": "tsc --watch",
