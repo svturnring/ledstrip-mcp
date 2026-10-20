@@ -17,10 +17,10 @@ No extra privileges are needed: BlueZ allows regular users to call `org.bluez` b
 
 ## Installation
 
-Install straight from GitHub (the repo is public; `npm` clones it, runs the TypeScript build via the `prepare` script and links the `ledstrip-mcp` command — no separate build step):
+Install from a GitHub Release with `npm` (Linux only — the tool talks to BlueZ over D-Bus):
 
 ```sh
-npm install -g github:svturnring/ledstrip-mcp
+npm install -g https://github.com/svturnring/ledstrip-mcp/releases/download/v0.5.0/ledstrip-mcp-0.5.0.tgz
 ```
 
 Verify:
@@ -29,7 +29,9 @@ Verify:
 ledstrip-mcp --version
 ```
 
-To upgrade to a newer commit: run the same command again (or add `@<tag>` once release tags are used).
+To upgrade, run the same command with a newer release tag. The latest release is always linked from the repo's front page.
+
+> **Why a release tarball and not `npm install -g github:...`?** npm's global install of a git dependency leaves a symlink into a temporary cache clone that it then deletes, so that install is always broken. A release tarball is copied for real.
 
 <details>
 <summary>Development install (from a local clone)</summary>
@@ -37,9 +39,12 @@ To upgrade to a newer commit: run the same command again (or add `@<tag>` once r
 ```sh
 git clone https://github.com/svturnring/ledstrip-mcp.git
 cd ledstrip-mcp
-npm install          # prepare script builds dist/ automatically
+npm install          # installs dependencies (dist/ is already committed)
+npm run build        # recompile after editing src/
 npm link             # or: npm install -g .
 ```
+
+To cut a release: bump `version` in `package.json`, commit, then `scripts/release.sh` — it builds, packs and uploads the tarball to a new GitHub Release.
 
 </details>
 
